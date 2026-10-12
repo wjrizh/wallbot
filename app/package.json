@@ -1,0 +1,23 @@
+{
+  "name": "wallbot-app",
+  "version": "1.0.0",
+  "description": "爬壁机器人母机控制平板 App",
+  "private": true,
+  "scripts": {
+    "test": "node test/protocol.test.js",
+    "sync": "cap sync",
+    "add:android": "cap add android",
+    "add:ios": "cap add ios",
+    "open:android": "cap open android",
+    "open:ios": "cap open ios",
+    "serve": "node tools/serve.js"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/ios": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}

@@ -1,0 +1,27 @@
+# 依赖与构建产物
+node_modules/
+build/
+.gradle/
+capacitor-cordova-android-plugins/
+
+# Android
+local.properties
+*.apk
+*.aab
+*.keystore
+
+# IDE / 回收站
+.ligong-ide-trash/
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 编译临时目录
+/tmp/
+*.bin.bak
+
+# 厂商预编译工具（二进制）
+ESP32S3/颜色阈值调整工具/HSV/

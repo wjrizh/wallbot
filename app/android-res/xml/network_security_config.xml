@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 明文流量配置
+  母机使用 ws:// (非加密 WebSocket) 与局域网 HTTP, Android 9+ 默认禁止明文流量。
+  本配置在 App 内允许明文, 不改动系统全局设置。
+  应用方式: cap add android 后, 将该文件复制到
+    android/app/src/main/res/xml/network_security_config.xml
+  并在 android/app/src/main/AndroidManifest.xml 的 <application> 上添加
+    android:usesCleartextTraffic="true"
+    android:networkSecurityConfig="@xml/network_security_config"
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

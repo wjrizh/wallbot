@@ -1,0 +1,15 @@
+{
+  "appId": "com.wallbot.controller",
+  "appName": "爬壁机器人",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http",
+    "iosScheme": "capacitor"
+  },
+  "android": {
+    "allowMixedContent": true
+  },
+  "ios": {
+    "contentInset": "always"
+  }
+}
