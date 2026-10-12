@@ -28,3 +28,20 @@ ESP32S3/颜色阈值调整工具/HSV/
 
 # ESP32S3 例程与预编译固件（第三方资料，不入库）
 ESP32S3/
+
+# cap sync 生成的 www 副本
+app/android/app/src/main/assets/public/
+
+# 非项目代码：测试固件、硬件资料、备份
+_backup_before_mit/
+_can_port_handoff/
+firmware_backup_20260923_175934/
+imu_web_test/
+imu_wireless/
+laser_multitest/
+tof_test/
+main.c
+rs02_csp_quintic.ino
+*.tel
+ACK闭环测试表.md
+Netlist_Schematic1_2026-09-22.tel
