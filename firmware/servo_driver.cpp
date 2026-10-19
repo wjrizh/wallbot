@@ -170,6 +170,24 @@ void Servo_SetGrip(float angle_deg, float duration_sec) {
     }
 }
 
+void Servo_HoldPB9(void) {
+    if (xServoMutex && xSemaphoreTake(xServoMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        traj_pb9.active = false;
+        traj_pb9.qf = cur_pb9;
+        traj_pb9.q0 = cur_pb9;
+        xSemaphoreGive(xServoMutex);
+    }
+}
+
+void Servo_HoldGrip(void) {
+    if (xServoMutex && xSemaphoreTake(xServoMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        traj_grip.active = false;
+        traj_grip.qf = cur_grip;
+        traj_grip.q0 = cur_grip;
+        xSemaphoreGive(xServoMutex);
+    }
+}
+
 void Task_ServoDrive(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xPeriod = pdMS_TO_TICKS(SERVO_TASK_PERIOD_MS);

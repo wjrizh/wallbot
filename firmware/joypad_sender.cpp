@@ -70,6 +70,15 @@ void JoypadSender_Task(void *pvParameters) {
             continue;
         }
 
+        /* 协同已退出但仍有遗留帧 (如 STOP) 待发, 优先发出 */
+        uint8_t fbuf[4]; uint8_t flen = 0;
+        if (AutoMode_WantsSendFrame(fbuf, &flen)) {
+            NRF_StopListening();
+            NRF_SendFrame(fbuf, flen);
+            AutoMode_OnFrameSent();
+        }
+
+        NRF_StopListening();
         bool success = NRF_SendFrame(buf, sizeof(buf));
         signal_quality = CalculateSuccessRatio(success);
 

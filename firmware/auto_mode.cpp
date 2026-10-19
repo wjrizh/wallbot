@@ -94,13 +94,16 @@ void AutoMode_StartCoop(void) {
 /* 协同中止: PB9/夹持器停在当前位置(不锁死), 发STOP通知子机, 再回IDLE */
 void AutoMode_Abort(void) {
     if (g_cs == COOP_IDLE) return;
-    Serial.println("[COOP] 中止协同, 停到当前位置");
-    /* 停到当前位置: 目标=当前角度, 时长0(立即), 后续仍可调试单独控制 */
-    Servo_SetPB9(Servo_GetAngle(9), 0.0f);
-    Servo_SetGrip(Servo_GetAngle(5), 0.0f);
+    Serial.println("[COOP] 人工介入, 立即退出协同");
+    /* 吸盘/夹持器: 冻结在当前角度, 停止插值且不改 PWM, 不参与接管后的控制 */
+    Servo_HoldPB9();
+    Servo_HoldGrip();
     g_gripper_polling = false;
+    /* 通知子机中止: 帧先入队, 由发送任务下一次循环发出 */
     request_send(FRAME_STOP);
-    g_cs = COOP_SEND_STOP;
+    /* 立即回 IDLE, 不等 STOP 帧发送结果, 保证子机控制通道立刻可用 */
+    g_cs = COOP_IDLE;
+    NRF_StopListening();
 }
 
 bool AutoMode_WantsSendFrame(uint8_t* out_buf, uint8_t* out_len) {
@@ -237,6 +240,10 @@ void AutoMode_Tick(void) {
         }
         break;
     case COOP_SEND_LOCK:
+        break;
+    case COOP_SEND_STOP:
+        /* STOP 已发出 (或超时未发出), 确保退出协同 */
+        g_cs = COOP_IDLE;
         break;
     case COOP_WAIT_ACKD:
         if (recv_match(FRAME_ACKD)) {
