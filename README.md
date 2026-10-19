@@ -26,6 +26,35 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,Uploa
 烧录:
 arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,UploadMode=default --input-dir /tmp/wallbot_build .
 
+### 摄像头板编译烧录 (摄像头母机 / 摄像头子机)
+
+两块摄像头板均为 ESP32-S3-CAM + **8MB Flash + OPI PSRAM**。
+务必用 `FlashSize=8M`, 用 16M 会启动即崩:
+`Detected size(8192k) smaller than the size in the binary image header(16384k). Probe failed.`
+
+- FQBN: `esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB`
+- 端口: 摄像头板走 USB 转串口, 通常是 `/dev/ttyUSB0` (母机板是 `/dev/ttyACM0`)
+- arduino-cli 要求目录名与主 .ino 同名, 先复制到临时目录再编译:
+
+```sh
+mkdir -p /tmp/wbcam/camhost && cp 摄像头母机/摄像头母机.ino /tmp/wbcam/camhost/camhost.ino
+arduino-cli compile --fqbn 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB' /tmp/wbcam/camhost
+arduino-cli upload -p /dev/ttyUSB0 --fqbn 'esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,FlashSize=8M,PartitionScheme=default_8MB' /tmp/wbcam/camhost
+```
+
+子机同理, 把 `摄像头母机` 换成 `摄像头子机`, 目录名换成 `camchild`。
+
+### 设备地址 (自动发现)
+
+三块板均通过 DHCP 获取 IP, 并监听 UDP 48899 应答发现请求:
+
+- 请求: 广播 `WALLBOT_DISCOVER` 到 48899
+- 应答: `WALLBOT:<role>:<ip>`, role 为 `host` / `camhost` / `camchild`
+
+App 首次启动广播发现并缓存地址; 再次启动直接复用缓存,
+仅在 WebSocket 连不上或摄像头重试耗尽时才重新发现。
+面板「设备地址」也可手动填写兜底。
+
 ### App 构建
 
 - Node.js + npm

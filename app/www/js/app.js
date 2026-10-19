@@ -27,6 +27,9 @@
     this._connText = null;
     this._pendingState = null;
     this._frameRequested = false;
+    this._discovering = false;
+    this._discoverTimer = null;
+    this._camGiveUp = {};
   }
 
   App.prototype.init = function () {
@@ -47,6 +50,7 @@
     this._bindCameraZoom();
 
     this.transport.on('status', function (status) { self._onStatus(status); });
+    this.transport.on('offline', function (info) { self._onWsOffline(info); });
     this.transport.on('state', function (state) { self._queueState(state); });
     this.transport.on('ack', function (ack) { self._onAck(ack); });
     this.transport.on('log', function (msg) { UI.log(msg); });
@@ -55,7 +59,7 @@
     this._loadSavedHost();
     this.transport.connect();
     this._onStatus(Transport.STATUS.OFFLINE);
-    this._autoDiscover();
+    this._bootAddressFlow();
 
     var sw = document.getElementById('viewSwitch');
     if (sw) {
@@ -254,6 +258,61 @@
     UI.log('[地址] 已应用 母机=' + (host || '-') + ' 摄像头母机=' + (camHost || '-') + ' 摄像头子机=' + (camChild || '-'));
   };
 
+  /* 启动流程: 有缓存地址先直接用, 同时起延时兜底; 无缓存立即发现 */
+  App.prototype._bootAddressFlow = function () {
+    var self = this;
+    var hasHost = !!this.transport.getHost();
+    var cam = this._cameraModule();
+    var hasCam = !!(cam && (cam.getIp('host') || cam.getIp('child')));
+
+    if (hasHost || hasCam) {
+      UI.log('[地址] 复用缓存: 母机=' + (this.transport.getHost() || '-') +
+             ' 摄像头母机=' + (cam ? cam.getIp('host') || '-' : '-') +
+             ' 摄像头子机=' + (cam ? cam.getIp('child') || '-' : '-'));
+      this._scheduleDiscoverFallback(6000);
+    } else {
+      this._autoDiscover('启动无缓存');
+    }
+  };
+
+  /* 缓存失效兜底: 超时仍未连上则重新发现 */
+  App.prototype._scheduleDiscoverFallback = function (delay) {
+    var self = this;
+    if (this._discoverTimer) clearTimeout(this._discoverTimer);
+    this._discoverTimer = setTimeout(function () {
+      self._discoverTimer = null;
+      if (self.transport.isOnline()) return;
+      UI.log('[发现] 缓存地址未连通, 重新扫描');
+      self._autoDiscover('缓存失效');
+    }, delay);
+  };
+
+  /* WebSocket 断开: 缓存地址连不上才重新发现, 连过又断先靠重连 */
+  App.prototype._onWsOffline = function (info) {
+    if (this._discovering) return;
+    if (this._discoverTimer) return;
+    if (!this.transport.getHost()) return;
+
+    var everOnline = info && info.everOnline;
+    var retry = (info && info.retry) || 0;
+    if (everOnline && retry < 3) {
+      UI.log('[连接] 掉线重连中 (第 ' + (retry + 1) + ' 次)');
+      return;
+    }
+    UI.log('[连接] 地址 ' + this.transport.getHost() + ' 连不上, 触发重新发现');
+    this._scheduleDiscoverFallback(everOnline ? 3000 : 1000);
+  };
+
+  /* 某路摄像头重试耗尽: 清掉该路缓存并重新发现 */
+  App.prototype._onCameraGiveUp = function (key) {
+    if (this._camGiveUp[key]) return;
+    this._camGiveUp[key] = true;
+    var cam = this._cameraModule();
+    if (cam) cam.clearIp(key);
+    UI.log('[发现] 摄像头[' + key + '] 地址失效, 重新扫描');
+    this._autoDiscover('摄像头地址失效');
+  };
+
   /* 应用发现结果: 母机 WS 地址 + 两路摄像头地址 */
   App.prototype._applyDiscovery = function (res) {
     if (!res) return;
@@ -262,31 +321,44 @@
       this.transport.setHost(host);
       try { global.localStorage.setItem(HOST_STORAGE_KEY, host); } catch (e) {}
       UI.log('[发现] 母机 ' + host);
+      this.transport.resetForNewHost();
       this.transport.disconnect();
       this.transport.connect();
     }
 
     var cam = this._cameraModule();
     if (cam) {
-      if (res.camHost) cam.setIp('host', res.camHost);
-      if (res.camChild) cam.setIp('child', res.camChild);
+      if (res.camHost) { cam.setIp('host', res.camHost); this._camGiveUp.host = false; }
+      if (res.camChild) { cam.setIp('child', res.camChild); this._camGiveUp.child = false; }
       cam.connect();
     }
     this._syncHostInputs();
     if (!host && !res.camHost && !res.camChild) UI.log('[发现] 未收到任何设备应答');
+    else if (this.transport.isOnline()) this._clearDiscoverTimer();
+  };
+
+  App.prototype._clearDiscoverTimer = function () {
+    if (this._discoverTimer) { clearTimeout(this._discoverTimer); this._discoverTimer = null; }
   };
 
   /* 原生 UDP 广播发现; 非 Capacitor 环境降级为使用已保存地址 */
-  App.prototype._autoDiscover = function () {
+  App.prototype._autoDiscover = function (reason) {
     var self = this;
+    if (this._discovering) return;
     var plugin = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Discovery;
     if (!plugin || typeof plugin.discover !== 'function') {
       UI.log('[发现] 原生插件不可用, 使用已保存地址');
       return;
     }
-    UI.log('[发现] 正在扫描局域网…');
-    plugin.discover().then(function (res) { self._applyDiscovery(res); })
-      .catch(function (err) { UI.log('[发现] 失败: ' + (err && err.message)); });
+    this._discovering = true;
+    UI.log('[发现] 正在扫描局域网…' + (reason ? ' (' + reason + ')' : ''));
+    plugin.discover().then(function (res) {
+      self._discovering = false;
+      self._applyDiscovery(res);
+    }).catch(function (err) {
+      self._discovering = false;
+      UI.log('[发现] 失败: ' + (err && err.message));
+    });
   };
 
   App.prototype._onStatus = function (status) {
@@ -299,7 +371,11 @@
     if (this._connDot) this._connDot.className = 'dot ' + cfg.dot;
     if (this._connText) this._connText.textContent = cfg.text;
 
-    if (status === 'online') this._hideMask();
+    if (status === 'online') {
+      this._hideMask();
+      this._clearDiscoverTimer();
+      this._camGiveUp = {};
+    }
   };
 
   document.addEventListener('DOMContentLoaded', function () {

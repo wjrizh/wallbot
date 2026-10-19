@@ -12,6 +12,19 @@
   var STREAM_PORT = 81;
   var RETRY_MS = 3000;
   var RETRY_LIMIT = 3;
+  var STORAGE_KEY = { host: "wallbot.camHost", child: "wallbot.camChild" };
+
+  function loadSavedIp(key) {
+    try { return global.localStorage && global.localStorage.getItem(STORAGE_KEY[key]) || ""; }
+    catch (e) { return ""; }
+  }
+
+  function saveIp(key, ip) {
+    try {
+      if (!ip) global.localStorage.removeItem(STORAGE_KEY[key]);
+      else global.localStorage.setItem(STORAGE_KEY[key], ip);
+    } catch (e) {}
+  }
 
   // 每路摄像头一个通道: 独立 IP / 容器 / badge / <img> / 重连
   // ip 由 App 自动发现写入 (setIp), 为空表示尚未发现
@@ -23,7 +36,7 @@
   function Channel(cfg, app) {
     this.app = app;
     this.key = cfg.key;
-    this.ip = cfg.ip;
+    this.ip = loadSavedIp(cfg.key) || cfg.ip;
     this.cardSel = cfg.cardSel;
     this.badgeSel = cfg.badgeSel;
     this.card = null;
@@ -76,7 +89,11 @@
   Channel.prototype._scheduleRetry = function () {
     var self = this;
     this._clearRetry();
-    if (this.retryCount >= RETRY_LIMIT) return;
+    if (this.retryCount >= RETRY_LIMIT) {
+      /* 缓存地址失效: 通知 App 触发重新发现 */
+      if (this.app && typeof this.app._onCameraGiveUp === "function") this.app._onCameraGiveUp(this.key);
+      return;
+    }
     this.retryCount++;
     this.retryTimer = setTimeout(function () { self.connect(); }, RETRY_MS);
   };
@@ -159,7 +176,17 @@
     var ch = this.channels.filter(function (c) { return c.key === key; })[0];
     if (!ch || !ip || ch.ip === ip) return;
     ch.ip = ip;
+    ch.retryCount = 0;
+    saveIp(key, ip);
     if (ch.img) { ch.disconnect(); ch.connect(); }
+  };
+
+  CameraModule.prototype.clearIp = function (key) {
+    var ch = this.channels.filter(function (c) { return c.key === key; })[0];
+    if (!ch) return;
+    ch.ip = "";
+    ch.retryCount = 0;
+    saveIp(key, "");
   };
 
   CameraModule.prototype.disconnect = function () {

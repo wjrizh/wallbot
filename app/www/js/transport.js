@@ -19,6 +19,8 @@
     this._manualClose = false;
     this._listeners = {};
     this._stateHandler = null;
+    this._everOnline = false;
+    this._lastError = '';
   }
 
   Transport.prototype.on = function (event, handler) {
@@ -79,6 +81,7 @@
 
     ws.onopen = function () {
       self._retry = 0;
+      self._everOnline = true;
       self._setStatus(STATUS.ONLINE);
       self._emit('log', 'WebSocket 已连接');
     };
@@ -95,10 +98,12 @@
     };
 
     ws.onclose = function (ev) {
-      self._ws = null;
+      if (ws.__superseded) return;
+      if (self._ws === ws) self._ws = null;
       self._setStatus(STATUS.OFFLINE);
-      if (self._manualClose) return;
+      if (self._manualClose) { self._manualClose = false; return; }
       self._emit('log', '连接断开 code=' + (ev && ev.code) + ' reason=' + (ev && ev.reason) + ', 重连中…');
+      self._emit('offline', { host: self._host, everOnline: self._everOnline, retry: self._retry, error: self._lastError });
       self._scheduleRetry();
     };
 
@@ -124,12 +129,28 @@
   Transport.prototype.disconnect = function () {
     this._manualClose = true;
     this._clearRetry();
-    if (this._ws) { try { this._ws.close(); } catch (e) {} this._ws = null; }
+    if (this._ws) {
+      var old = this._ws;
+      old.__superseded = true;
+      old.onopen = null;
+      old.onmessage = null;
+      old.onerror = null;
+      old.onclose = null;
+      try { old.close(); } catch (e) {}
+      this._ws = null;
+    }
     this._setStatus(STATUS.OFFLINE);
     this._emit('log', '已断开');
   };
 
   Transport.prototype.isOnline = function () { return this._status === STATUS.ONLINE; };
+  Transport.prototype.hasEverConnected = function () { return this._everOnline; };
+
+  /* 换地址重连: 重置历史状态, 不触发离线发现 */
+  Transport.prototype.resetForNewHost = function () {
+    this._everOnline = false;
+    this._retry = 0;
+  };
 
   Transport.prototype.send = function (frame) {
     if (!this.isOnline() || !this._ws) {
