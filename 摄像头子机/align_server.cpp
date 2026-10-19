@@ -9,6 +9,8 @@
 #include <Arduino.h>
 #include "esp_camera.h"
 #include "esp_http_server.h"
+#include "img_converters.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -23,28 +25,68 @@ static Deviation g_last_dev;
 static bool g_last_valid = false;
 static char g_last_reason[32] = "never_run";
 
+/* 检测工作缓冲 (QVGA): JPEG 解码 -> RGB888 -> 灰度, 首次调用时分配一次复用 */
+static uint8_t *s_dec_rgb = NULL;
+static uint8_t *s_dec_gray = NULL;
+static volatile bool s_measuring = false;
+
+static bool measure_bufs_init(void) {
+    if (s_dec_rgb && s_dec_gray) return true;
+    if (!s_dec_rgb) {
+        s_dec_rgb = (uint8_t *)heap_caps_malloc(
+            (size_t)ALIGN_DETECT_W * ALIGN_DETECT_H * 3, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_dec_rgb) s_dec_rgb = (uint8_t *)malloc((size_t)ALIGN_DETECT_W * ALIGN_DETECT_H * 3);
+    }
+    if (!s_dec_gray) {
+        s_dec_gray = (uint8_t *)heap_caps_malloc(
+            (size_t)ALIGN_DETECT_W * ALIGN_DETECT_H, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_dec_gray) s_dec_gray = (uint8_t *)malloc((size_t)ALIGN_DETECT_W * ALIGN_DETECT_H);
+    }
+    return s_dec_rgb && s_dec_gray;
+}
+
 /* 连拍 ALIGN_FRAMES 帧投票检测; 全部命中且一致 -> 返回平均观测 */
 static bool measure_consensus(TagObservation *avg, const char **reason) {
-    if (!Cam_EnterDetectMode()) {
-        *reason = "cam_failed";
+    if (__atomic_test_and_set(&s_measuring, __ATOMIC_SEQ_CST)) {
+        *reason = "busy";
         return false;
     }
+
     TagObservation obs[ALIGN_FRAMES];
     int n_ok = 0;
-    for (int k = 0; k < ALIGN_FRAMES; k++) {
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) continue;
-        TagObservation o;
-        bool got = TagDetector_Detect(fb->buf, fb->width, fb->height, fb->width, &o);
-        esp_camera_fb_return(fb);
-        if (got) obs[n_ok++] = o;
-    }
-    Cam_ExitDetectMode();
+    bool result = false;
 
-    if (n_ok < ALIGN_FRAMES) {           /* 连续一致才采信: 有一帧丢失即不采信 */
-        *reason = (n_ok == 0) ? "no_tag" : "tag_unstable";
-        return false;
-    }
+    do {
+        if (!measure_bufs_init()) { *reason = "no_mem"; break; }
+        if (!Cam_EnterDetectMode()) { *reason = "cam_failed"; break; }
+
+        /* 多给几帧余量: 偶发坏帧/JPEG 解码失败不轻易放弃 */
+        for (int k = 0; k < ALIGN_FRAMES * 3 && n_ok < ALIGN_FRAMES; k++) {
+            camera_fb_t *fb = esp_camera_fb_get();
+            if (!fb) continue;
+
+            bool got = false;
+            TagObservation o;
+            /* 相机全程保持 JPEG; 检测前解码为灰度 (尺寸=ALIGN_DETECT_W/H, 检测模式已切 QVGA) */
+            if (fb->format == PIXFORMAT_JPEG && fb->len > 0 &&
+                fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, s_dec_rgb)) {
+                const uint32_t npix = (uint32_t)ALIGN_DETECT_W * ALIGN_DETECT_H;
+                for (uint32_t i = 0; i < npix; i++) {
+                    const uint8_t *px = &s_dec_rgb[i * 3];
+                    s_dec_gray[i] = (uint8_t)((px[0] * 77 + px[1] * 151 + px[2] * 28) >> 8);
+                }
+                got = TagDetector_Detect(s_dec_gray, ALIGN_DETECT_W, ALIGN_DETECT_H,
+                                         ALIGN_DETECT_W, &o);
+            }
+            esp_camera_fb_return(fb);
+            if (got) obs[n_ok++] = o;
+        }
+        Cam_ExitDetectMode();
+
+        if (n_ok < ALIGN_FRAMES) {           /* 连续一致才采信: 有一帧丢失即不采信 */
+            *reason = (n_ok == 0) ? "no_tag" : "tag_unstable";
+            break;
+        }
 
     /* 一致性: theta 展幅与中心位移 */
     float th_min = 1e9f, th_max = -1e9f;
@@ -63,7 +105,7 @@ static bool measure_consensus(TagObservation *avg, const char **reason) {
     if ((th_max - th_min) * 180.0f / (float)M_PI > ALIGN_THETA_SPREAD ||
         (u_max - u_min) > ALIGN_UV_SPREAD || (v_max - v_min) > ALIGN_UV_SPREAD) {
         *reason = "jitter";
-        return false;
+        break;
     }
 
 
@@ -82,7 +124,11 @@ static bool measure_consensus(TagObservation *avg, const char **reason) {
         memcpy(avg->corners, obs[0].corners, sizeof(avg->corners));
     }
     avg->theta = atan2f(sin_sum, cos_sum);
-    return true;
+    result = true;
+    } while (0);
+
+    __atomic_clear(&s_measuring, __ATOMIC_SEQ_CST);
+    return result;
 }
 
 /* ---- GET /align/get ---- */

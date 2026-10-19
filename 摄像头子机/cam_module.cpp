@@ -97,12 +97,12 @@ void Cam_Init(void) {
     else s_cam_err2 = (int)ESP_FAIL;
 }
 
-/* 切到灰度低分辨率检测模式 */
+/* 检测模式: 只切分辨率 (像素格式保持 JPEG 不变!
+ * esp32-camera 的 DMA 解析模式初始化时定死, 运行时切 pixformat 会产生坏帧) */
 bool Cam_EnterDetectMode(void) {
     if (!s_cam_ok || s_detect_mode) return s_cam_ok;
     sensor_t *s = esp_camera_sensor_get();
     if (!s) return false;
-    s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
     s->set_framesize(s, ALIGN_DETECT_FRAMESIZE);
     s_detect_mode = true;
     Cam_FlushFrames(6, 30);   // 等 AEC/AGC 收敛
@@ -113,7 +113,6 @@ void Cam_ExitDetectMode(void) {
     if (!s_detect_mode) return;
     sensor_t *s = esp_camera_sensor_get();
     if (s) {
-        s->set_pixformat(s, PIXFORMAT_JPEG);
         s->set_framesize(s, STREAM_FRAMESIZE);
     }
     s_detect_mode = false;

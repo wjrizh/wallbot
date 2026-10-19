@@ -28,8 +28,10 @@
 /* 流媒体分辨率/画质 (MJPEG 硬编码) */
 #define STREAM_FRAMESIZE      FRAMESIZE_HD
 #define STREAM_JPEG_QUALITY   11
-/* 检测分辨率 (灰度, 检测算法开销 O(W*H), QVGA 在 S3 上单帧约几十 ms) */
+/* ---- 检测分辨率 (检测模式只切分辨率, 保持 JPEG; 板上解码为灰度后检测) ---- */
 #define ALIGN_DETECT_FRAMESIZE  FRAMESIZE_QVGA
+#define ALIGN_DETECT_W          320   /* FRAMESIZE_QVGA 对应的宽 */
+#define ALIGN_DETECT_H          240   /* FRAMESIZE_QVGA 对应的高 */
 
 /* ---- AprilTag / 视觉纠偏几何参数 (与 code/tag_utils.py 保持一致) ---- */
 #define TAG_REAL_MM       50.0f  /* 标签黑框真实边长(mm), 打印后实测填入 */
