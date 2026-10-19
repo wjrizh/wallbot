@@ -22,6 +22,7 @@
       new DebugModule(this),
       new GripperModule(this),
       new CoopPadModule(this),
+      new AlignModule(this),
     ];
     this._connDot = null;
     this._connText = null;

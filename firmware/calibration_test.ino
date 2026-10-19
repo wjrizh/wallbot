@@ -16,6 +16,7 @@
 #include "laser_tof.h"
 #include "avoid_mode.h"
 #include "imu_driver.h"
+#include "align_bridge.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
@@ -30,6 +31,7 @@ static void Task_PushLaser(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
         WebServer_PushLaser();
+        AlignBridge_Tick();   /* 视觉纠偏闭环 (HTTP 拉取, 内部按 500ms 节流) */
     }
 }
 

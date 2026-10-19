@@ -113,6 +113,17 @@
 #define JOYPAD_CH_RV          3
 #define JOYPAD_SEND_PERIOD_MS 10
 
+/* 14. 子机指令直通 + 视觉纠偏闭环 */
+#define ALIGN_BRIDGE_PERIOD_MS   500    /* 拉取 /align/get 周期 */
+#define ALIGN_BRIDGE_TIMEOUT_MS  60000  /* 闭环总超时 */
+#define ALIGN_HTTP_TIMEOUT_MS    1500
+#define ALIGN_PSI_K              0.60f  /* spin = -K * psi_deg */
+#define ALIGN_AXIAL_K            0.80f  /* speed = -K * axial_mm/10 */
+#define ALIGN_PSI_DEAD_DEG       3.0f   /* 死区 (夹爪 5° 留裕量) */
+#define ALIGN_AXIAL_DEAD_MM      8.0f
+#define ALIGN_SPIN_MAX           60     /* spin 限幅 (子机 int8 指令域) */
+#define ALIGN_SPEED_MAX          60
+
 /* #define GAIT_SKIP_IMU */  /* 已启用 IMU 步态纠偏 */
 
 /* ===== 尺蠖步态几何 (新机器标定参数, 换机只改这里) ===== */

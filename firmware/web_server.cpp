@@ -227,7 +227,8 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
                 break;
             }
             /* ===== NRF手柄 + 子母协同 → 协议模块 (内部已回执) ===== */
-            case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1D: {
+            case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1D:
+            case 0x20: case 0x21: case 0x22: case 0x23: {
                 Protocol_ProcessFrame(data, len);
                 acked = true;
                 break;

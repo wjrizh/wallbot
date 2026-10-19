@@ -2,6 +2,7 @@
 #include "joypad_input.h"
 #include "nrf_sender.h"
 #include "auto_mode.h"
+#include "child_cmd.h"
 #include "config.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -76,6 +77,13 @@ void JoypadSender_Task(void *pvParameters) {
             NRF_StopListening();
             NRF_SendFrame(fbuf, flen);
             AutoMode_OnFrameSent();
+        }
+
+        /* 子机指令直通 (App 按键 / 视觉纠偏): 优先于虚拟手柄帧 */
+        uint8_t child_frame[32];
+        if (ChildCmd_Pop(child_frame)) {
+            NRF_StopListening();
+            NRF_SendFrame(child_frame, sizeof(child_frame));
         }
 
         NRF_StopListening();

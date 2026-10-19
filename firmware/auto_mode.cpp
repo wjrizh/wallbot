@@ -1,6 +1,7 @@
 #include "auto_mode.h"
 #include "nrf_sender.h"
 #include "servo_driver.h"
+#include "child_cmd.h"
 #include "config.h"
 #include <Arduino.h>
 #include <string.h>
@@ -99,6 +100,8 @@ void AutoMode_Abort(void) {
     Servo_HoldPB9();
     Servo_HoldGrip();
     g_gripper_polling = false;
+    /* 丢弃未发出的子机直通指令, 避免接管后继续驱动子机 */
+    ChildCmd_Clear();
     /* 通知子机中止: 帧先入队, 由发送任务下一次循环发出 */
     request_send(FRAME_STOP);
     /* 立即回 IDLE, 不等 STOP 帧发送结果, 保证子机控制通道立刻可用 */
