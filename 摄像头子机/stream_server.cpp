@@ -40,8 +40,15 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     while (true) {
         fb = esp_camera_fb_get();
         if (!fb) {
-            res = ESP_FAIL;
-            break;
+            // /align 切检测模式瞬间会短暂取不到帧: 重试 2s 而不是直接断流
+            uint32_t wait0 = millis();
+            bool recovered = false;
+            while (millis() - wait0 < 2000) {
+                delay(20);
+                fb = esp_camera_fb_get();
+                if (fb) { recovered = true; break; }
+            }
+            if (!recovered) { res = ESP_FAIL; break; }
         }
 
         fps_frames++;
@@ -58,11 +65,11 @@ static esp_err_t stream_handler(httpd_req_t *req) {
             jpg_buf = fb->buf;
             jpg_len = fb->len;
         } else {
-            // 灰度检测模式期间流被拉低: 走软编码
+            // 灰度检测模式期间: 软编码; 编码失败跳帧续传, 不断流
             if (!frame2jpg(fb, 12, &jpg_buf, &jpg_len)) {
                 esp_camera_fb_return(fb);
-                res = ESP_FAIL;
-                break;
+                delay(20);
+                continue;
             }
         }
 
