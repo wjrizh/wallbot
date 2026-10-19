@@ -52,8 +52,10 @@
     this.transport.on('log', function (msg) { UI.log(msg); });
 
     this._bindControls();
+    this._loadSavedHost();
     this.transport.connect();
     this._onStatus(Transport.STATUS.OFFLINE);
+    this._autoDiscover();
 
     var sw = document.getElementById('viewSwitch');
     if (sw) {
@@ -202,6 +204,9 @@
 
     UI.$('#btnClearLog').addEventListener('click', function () { UI.clearLog(); });
 
+    var applyBtn = UI.$('#btnApplyHost');
+    if (applyBtn) applyBtn.addEventListener('click', function () { self._applyManualHost(); });
+
     var segItems = document.querySelectorAll('.seg-item');
     for (var i = 0; i < segItems.length; i++) {
       segItems[i].addEventListener('click', function () { self._setView(this.getAttribute('data-view')); });
@@ -211,8 +216,77 @@
   };
 
   App.prototype._autoCamera = function () {
-    var cam = this.modules.filter(function (m) { return m instanceof CameraModule; })[0];
+    var cam = this._cameraModule();
     if (cam) cam.connect();
+  };
+
+  App.prototype._cameraModule = function () {
+    return this.modules.filter(function (m) { return m instanceof CameraModule; })[0];
+  };
+
+  App.prototype._loadSavedHost = function () {
+    try {
+      var saved = global.localStorage && global.localStorage.getItem(HOST_STORAGE_KEY);
+      if (saved) this.transport.setHost(saved);
+    } catch (e) {}
+    this._syncHostInputs();
+  };
+
+  App.prototype._syncHostInputs = function () {
+    var hostEl = UI.$('#hostInput');
+    if (hostEl) hostEl.value = this.transport.getHost() || '';
+    var cam = this._cameraModule();
+    var camHostEl = UI.$('#camHostInput');
+    var camChildEl = UI.$('#camChildInput');
+    if (cam && camHostEl) camHostEl.value = cam.getIp('host') || '';
+    if (cam && camChildEl) camChildEl.value = cam.getIp('child') || '';
+  };
+
+  /* 手动兜底: 用户填写地址后应用 */
+  App.prototype._applyManualHost = function () {
+    var hostEl = UI.$('#hostInput');
+    var camHostEl = UI.$('#camHostInput');
+    var camChildEl = UI.$('#camChildInput');
+    var host = hostEl ? hostEl.value.trim() : '';
+    var camHost = camHostEl ? camHostEl.value.trim() : '';
+    var camChild = camChildEl ? camChildEl.value.trim() : '';
+    this._applyDiscovery({ host: host, camHost: camHost, camChild: camChild });
+    UI.log('[地址] 已应用 母机=' + (host || '-') + ' 摄像头母机=' + (camHost || '-') + ' 摄像头子机=' + (camChild || '-'));
+  };
+
+  /* 应用发现结果: 母机 WS 地址 + 两路摄像头地址 */
+  App.prototype._applyDiscovery = function (res) {
+    if (!res) return;
+    var host = res.host || '';
+    if (host && host !== this.transport.getHost()) {
+      this.transport.setHost(host);
+      try { global.localStorage.setItem(HOST_STORAGE_KEY, host); } catch (e) {}
+      UI.log('[发现] 母机 ' + host);
+      this.transport.disconnect();
+      this.transport.connect();
+    }
+
+    var cam = this._cameraModule();
+    if (cam) {
+      if (res.camHost) cam.setIp('host', res.camHost);
+      if (res.camChild) cam.setIp('child', res.camChild);
+      cam.connect();
+    }
+    this._syncHostInputs();
+    if (!host && !res.camHost && !res.camChild) UI.log('[发现] 未收到任何设备应答');
+  };
+
+  /* 原生 UDP 广播发现; 非 Capacitor 环境降级为使用已保存地址 */
+  App.prototype._autoDiscover = function () {
+    var self = this;
+    var plugin = global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.Discovery;
+    if (!plugin || typeof plugin.discover !== 'function') {
+      UI.log('[发现] 原生插件不可用, 使用已保存地址');
+      return;
+    }
+    UI.log('[发现] 正在扫描局域网…');
+    plugin.discover().then(function (res) { self._applyDiscovery(res); })
+      .catch(function (err) { UI.log('[发现] 失败: ' + (err && err.message)); });
   };
 
   App.prototype._onStatus = function (status) {

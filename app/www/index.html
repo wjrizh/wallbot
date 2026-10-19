@@ -44,6 +44,16 @@
     <div class="panel-body">
 
       <section class="block">
+        <div class="block-title">设备地址 <span class="muted">自动发现 / 手动填写</span></div>
+        <div class="host-row">
+          <input id="hostInput" class="host-input" type="text" placeholder="母机 IP" autocapitalize="off" autocomplete="off" spellcheck="false" />
+          <input id="camHostInput" class="host-input" type="text" placeholder="摄像头母机 IP" autocapitalize="off" autocomplete="off" spellcheck="false" />
+          <input id="camChildInput" class="host-input" type="text" placeholder="摄像头子机 IP" autocapitalize="off" autocomplete="off" spellcheck="false" />
+          <button id="btnApplyHost" class="text-btn">应用</button>
+        </div>
+      </section>
+
+      <section class="block">
         <div class="block-title">CAN 电机 <span class="muted">RS02</span></div>
         <div id="canCard"></div>
       </section>

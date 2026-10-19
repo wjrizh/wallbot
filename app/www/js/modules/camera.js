@@ -14,9 +14,10 @@
   var RETRY_LIMIT = 3;
 
   // 每路摄像头一个通道: 独立 IP / 容器 / badge / <img> / 重连
+  // ip 由 App 自动发现写入 (setIp), 为空表示尚未发现
   var CHANNELS = [
-    { key: "host",  ip: "10.32.7.214", cardSel: "#cameraCard",  badgeSel: "#cameraBadge"  },
-    { key: "child", ip: "10.32.7.215", cardSel: "#cameraCard2", badgeSel: "#cameraBadge2" }
+    { key: "host",  ip: "", cardSel: "#cameraCard",  badgeSel: "#cameraBadge"  },
+    { key: "child", ip: "", cardSel: "#cameraCard2", badgeSel: "#cameraBadge2" }
   ];
 
   function Channel(cfg, app) {
@@ -34,6 +35,7 @@
   }
 
   Channel.prototype.streamUrl = function () {
+    if (!this.ip) return "";
     var ip = this.ip.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
     if (ip.indexOf(":") >= 0) return "http://" + ip + "/stream";
     return "http://" + ip + ":" + STREAM_PORT + "/stream";
@@ -104,6 +106,10 @@
     this._clearRetry();
     var self = this;
     var url = this.streamUrl();
+    if (!url) {
+      this._setBadge("等待发现", "off");
+      return;
+    }
     this._removeMedia();
     this._hidePlaceholder();
     this._setBadge("连接中…", "off");
@@ -145,7 +151,15 @@
   };
 
   CameraModule.prototype.connect = function () {
-    this.channels.forEach(function (ch) { ch.connect(); });
+    this.channels.forEach(function (ch) { if (!ch.img) ch.connect(); });
+  };
+
+  /* 自动发现结果写入; 已有地址变化时断开并重连 */
+  CameraModule.prototype.setIp = function (key, ip) {
+    var ch = this.channels.filter(function (c) { return c.key === key; })[0];
+    if (!ch || !ip || ch.ip === ip) return;
+    ch.ip = ip;
+    if (ch.img) { ch.disconnect(); ch.connect(); }
   };
 
   CameraModule.prototype.disconnect = function () {

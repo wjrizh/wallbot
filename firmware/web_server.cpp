@@ -14,6 +14,7 @@
 #include "gait_engine.h"
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <HTTPClient.h>
 #include <ESPAsyncWebServer.h>
 #include <string.h>
@@ -25,6 +26,45 @@
 bool g_imu_online = false;
 static uint8_t g_imu_fail_count = 0;
 static volatile float g_imu_roll_cached = 0.0f;
+
+/* ==================== UDP 自动发现 ==================== */
+/* App 广播 WALLBOT_DISCOVER, 各板回 WALLBOT:<role>:<ip> */
+static const uint16_t DISCOVERY_PORT = 48899;
+static const char* DISCOVERY_REQ = "WALLBOT_DISCOVER";
+static WiFiUDP g_discovery_udp;
+
+static void Task_Discovery(void *pvParameters) {
+    (void)pvParameters;
+    if (!g_discovery_udp.begin(DISCOVERY_PORT)) {
+        Serial.printf("[UDP] begin :%u failed\n", DISCOVERY_PORT);
+        vTaskDelete(NULL);
+        return;
+    }
+    Serial.printf("[UDP] discovery listen :%u\n", DISCOVERY_PORT);
+
+    char rx[64];
+    for (;;) {
+        int size = g_discovery_udp.parsePacket();
+        if (size > 0 && size < (int)sizeof(rx)) {
+            int len = g_discovery_udp.read(rx, sizeof(rx) - 1);
+            if (len > 0) {
+                rx[len] = 0;
+                if (strncmp(rx, DISCOVERY_REQ, strlen(DISCOVERY_REQ)) == 0) {
+                    IPAddress rip = g_discovery_udp.remoteIP();
+                    uint16_t rport = g_discovery_udp.remotePort();
+                    char reply[48];
+                    int n = snprintf(reply, sizeof(reply), "WALLBOT:host:%s",
+                                     WiFi.localIP().toString().c_str());
+                    g_discovery_udp.beginPacket(rip, rport);
+                    g_discovery_udp.write((const uint8_t*)reply, n);
+                    g_discovery_udp.endPacket();
+                    Serial.printf("[UDP] reply %s -> %s\n", reply, rip.toString().c_str());
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
 
 void WebServer_RefreshIMU(void) {
     g_imu_roll_cached = FetchIMURoll();
@@ -207,8 +247,16 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
 void WebServer_Init(void) {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    WiFi.config(IPAddress(WIFI_STATIC_IP), IPAddress(WIFI_STATIC_GW),
-                IPAddress(WIFI_STATIC_MASK), IPAddress(WIFI_STATIC_DNS));
+    /* 诊断: 扫描可见热点 */
+    int n = WiFi.scanNetworks();
+    Serial.printf("[WiFi] scan: %d networks\n", n);
+    for (int i = 0; i < n && i < 15; i++) {
+        Serial.printf("[WiFi]   %s (%d dBm) ch=%d enc=%d\n",
+                      WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+                      WiFi.channel(i), (int)WiFi.encryptionType(i));
+    }
+    WiFi.scanDelete();
+    /* DHCP: 从热点获取与热点同网段的地址, 避免静态 IP 与热点网段不匹配 */
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.printf("[WiFi] STA connecting to %s ...\n", WIFI_SSID);
     uint32_t t0 = millis();
@@ -217,8 +265,11 @@ void WebServer_Init(void) {
         Serial.print(".");
     }
     Serial.println();
-    Serial.printf("[WiFi] STA: %s, IP: %s\n", WIFI_SSID,
-                  WiFi.localIP().toString().c_str());
+    Serial.printf("[WiFi] status=%d (3=connected, 1=no_ssid, 4=connect_failed, 6=disconnected)\n", (int)WiFi.status());
+    Serial.printf("[WiFi] STA: %s, IP: %s, GW: %s, MASK: %s\n", WIFI_SSID,
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.gatewayIP().toString().c_str(),
+                  WiFi.subnetMask().toString().c_str());
 
     /* 注入回执发送实现: 回给所有已连接客户端 */
     Protocol_SetAckSender([](const uint8_t* frame, uint16_t len) {
@@ -244,6 +295,10 @@ void WebServer_Init(void) {
 
     server.begin();
     Serial.println("[Web] HTTP + WS 二进制协议 已启动");
+
+    if (WiFi.status() == WL_CONNECTED) {
+        xTaskCreate(Task_Discovery, "Discovery", 4096, NULL, 1, NULL);
+    }
 }
 
 void WebServer_PushLaser(void) {

@@ -5,11 +5,51 @@
 #include "esp_camera.h"
 #include "img_converters.h"
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include "esp_http_server.h"
 
 // ---- WiFi ----
 static const char *WIFI_SSID = "robot";
 static const char *WIFI_PASS = "12345678";
+
+// ---- UDP 自动发现 ----
+static const uint16_t DISCOVERY_PORT = 48899;
+static const char *DISCOVERY_REQ = "WALLBOT_DISCOVER";
+static const char *DEVICE_ROLE = "camhost";
+static WiFiUDP g_discovery_udp;
+static bool g_discovery_started = false;
+
+static void discovery_poll() {
+    if (!g_discovery_started) {
+        if (WiFi.status() != WL_CONNECTED) return;
+        if (!g_discovery_udp.begin(DISCOVERY_PORT)) {
+            Serial.printf("[UDP] begin :%u failed\n", DISCOVERY_PORT);
+            return;
+        }
+        g_discovery_started = true;
+        Serial.printf("[UDP] discovery listen :%u\n", DISCOVERY_PORT);
+    }
+
+    int size = g_discovery_udp.parsePacket();
+    if (size <= 0) return;
+
+    char rx[64];
+    if (size >= (int)sizeof(rx)) { g_discovery_udp.flush(); return; }
+    int len = g_discovery_udp.read(rx, sizeof(rx) - 1);
+    if (len <= 0) return;
+    rx[len] = 0;
+    if (strncmp(rx, DISCOVERY_REQ, strlen(DISCOVERY_REQ)) != 0) return;
+
+    IPAddress rip = g_discovery_udp.remoteIP();
+    uint16_t rport = g_discovery_udp.remotePort();
+    char reply[48];
+    int n = snprintf(reply, sizeof(reply), "WALLBOT:%s:%s", DEVICE_ROLE,
+                     WiFi.localIP().toString().c_str());
+    g_discovery_udp.beginPacket(rip, rport);
+    g_discovery_udp.write((const uint8_t *)reply, n);
+    g_discovery_udp.endPacket();
+    Serial.printf("[UDP] reply %s -> %s\n", reply, rip.toString().c_str());
+}
 
 // ---- Camera pins: CAMERA_MODEL_ESP32S3_EYE ----
 #define PWDN_GPIO_NUM   -1
@@ -286,7 +326,9 @@ void loop() {
             Serial.println("WiFi lost, reconnecting...");
             WiFi.disconnect();
             WiFi.begin(WIFI_SSID, WIFI_PASS);
+            g_discovery_started = false;
         }
     }
-    delay(1000);
+    discovery_poll();
+    delay(20);
 }

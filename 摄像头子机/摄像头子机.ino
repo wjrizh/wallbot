@@ -1,4 +1,4 @@
-// MJPEG stream server for ESP32-S3-CAM (Hiwonder), STA mode + static IP.
+// MJPEG stream server for ESP32-S3-CAM (Hiwonder), STA mode + DHCP + UDP discovery.
 // Sensor: OV3660 (hardware JPEG), same camera config as the master board.
 // Endpoints:
 //   GET /       -> diagnostics (cam_init/pid/psram)
@@ -8,17 +8,52 @@
 #include "esp_camera.h"
 #include "img_converters.h"
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include "esp_http_server.h"
 
 // ---- WiFi ----
 static const char *WIFI_SSID = "robot";
 static const char *WIFI_PASS = "12345678";
-static IPAddress STATIC_IP(10, 32, 7, 215);
-static IPAddress STATIC_GW(10, 32, 7, 1);
-static IPAddress STATIC_MASK(255, 255, 255, 0);
-static IPAddress STATIC_DNS(10, 32, 7, 1);
-// NOTE: 平板 robot 热点网段为 10.32.7.x/24, 母机=10.32.7.214, 子机=10.32.7.215
-// 同网段通信不依赖网关, 若网关实际不是 .1 也不影响板子与平板互通
+// NOTE: DHCP 获取与平板热点同网段地址, 具体 IP 由 App 通过 UDP 发现获得
+
+// ---- UDP 自动发现 ----
+static const uint16_t DISCOVERY_PORT = 48899;
+static const char *DISCOVERY_REQ = "WALLBOT_DISCOVER";
+static const char *DEVICE_ROLE = "camchild";
+static WiFiUDP g_discovery_udp;
+static bool g_discovery_started = false;
+
+static void discovery_poll() {
+    if (!g_discovery_started) {
+        if (WiFi.status() != WL_CONNECTED) return;
+        if (!g_discovery_udp.begin(DISCOVERY_PORT)) {
+            Serial.printf("[UDP] begin :%u failed\n", DISCOVERY_PORT);
+            return;
+        }
+        g_discovery_started = true;
+        Serial.printf("[UDP] discovery listen :%u\n", DISCOVERY_PORT);
+    }
+
+    int size = g_discovery_udp.parsePacket();
+    if (size <= 0) return;
+
+    char rx[64];
+    if (size >= (int)sizeof(rx)) { g_discovery_udp.flush(); return; }
+    int len = g_discovery_udp.read(rx, sizeof(rx) - 1);
+    if (len <= 0) return;
+    rx[len] = 0;
+    if (strncmp(rx, DISCOVERY_REQ, strlen(DISCOVERY_REQ)) != 0) return;
+
+    IPAddress rip = g_discovery_udp.remoteIP();
+    uint16_t rport = g_discovery_udp.remotePort();
+    char reply[48];
+    int n = snprintf(reply, sizeof(reply), "WALLBOT:%s:%s", DEVICE_ROLE,
+                     WiFi.localIP().toString().c_str());
+    g_discovery_udp.beginPacket(rip, rport);
+    g_discovery_udp.write((const uint8_t *)reply, n);
+    g_discovery_udp.endPacket();
+    Serial.printf("[UDP] reply %s -> %s\n", reply, rip.toString().c_str());
+}
 
 // ---- Camera pins: CAMERA_MODEL_ESP32S3_EYE ----
 #define PWDN_GPIO_NUM   -1
@@ -249,9 +284,6 @@ static bool init_camera() {
 static void wifi_connect() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    if (!WiFi.config(STATIC_IP, STATIC_GW, STATIC_MASK, STATIC_DNS)) {
-        Serial.println("WiFi.config failed");
-    }
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     Serial.printf("Connecting to %s", WIFI_SSID);
     uint32_t start = millis();
@@ -300,7 +332,9 @@ void loop() {
             Serial.println("WiFi lost, reconnecting...");
             WiFi.disconnect();
             WiFi.begin(WIFI_SSID, WIFI_PASS);
+            g_discovery_started = false;
         }
     }
-    delay(1000);
+    discovery_poll();
+    delay(20);
 }

@@ -10,7 +10,7 @@
 
   function Transport() {
     this._ws = null;
-    this._host = '10.32.7.216';
+    this._host = '';
     this._port = 80;
     this._path = '/ws';
     this._status = STATUS.OFFLINE;
@@ -61,6 +61,11 @@
 
   Transport.prototype._open = function () {
     var self = this;
+    if (!this._host) {
+      this._setStatus(STATUS.OFFLINE);
+      this._emit('log', '等待设备地址…');
+      return;
+    }
     var url = 'ws://' + this._host + (this._port === 80 ? '' : ':' + this._port) + this._path;
     this._setStatus(STATUS.CONNECTING);
     this._emit('log', '连接 ' + url);
