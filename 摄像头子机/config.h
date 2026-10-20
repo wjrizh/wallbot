@@ -14,10 +14,21 @@
 
 #include "esp_camera.h"   /* FRAMESIZE_*/
 
-/* ---- WiFi (与母机/平板同一热点) ---- */
-#define WIFI_SSID     "robot"
+/* ---- WiFi: 子机自开热点 (AP 模式) ----
+ * 不再依赖外部热点与 DHCP: 地址固定, 平板/手机直连后打开 http://192.168.4.1/ 即可。
+ * 若需回到 STA 模式 (与母机同一热点), 把 CAM_AP_MODE 设为 0。 */
+#define CAM_AP_MODE   1
+#define WIFI_SSID     "robot"          /* STA 模式的上级热点 (CAM_AP_MODE=0 时生效) */
 #define WIFI_PASS     "12345678"
-/* NOTE: DHCP 获取与平板热点同网段地址, 具体 IP 由 App 通过 UDP 发现获得 */
+#define AP_SSID       "wallbot-cam"    /* 子机自己开的热点名 */
+/* 开放热点 (无密码): ESP32 Arduino 3.3.11 的 AP+WPA2 在 wpa_ap_get_wpa_ie
+ * 有已知崩溃 (LoadProhibited/LoadStoreAlignment), 客户端一探测就重启。
+ * 调试场景无需加密, 置空即走 WIFI_AUTH_OPEN, 彻底绕开该缺陷。 */
+#define AP_PASS       ""
+#define AP_IP         "192.168.4.1"
+#define AP_GW         "192.168.4.1"
+#define AP_MASK       "255.255.255.0"
+#define AP_CHANNEL    6
 
 /* ---- UDP 自动发现 ---- */
 #define DISCOVERY_PORT        48899
@@ -25,11 +36,19 @@
 #define DEVICE_ROLE           "camchild"
 
 /* ---- 摄像头 ---- */
-/* 流媒体分辨率/画质 (MJPEG 硬编码) */
-#define STREAM_FRAMESIZE      FRAMESIZE_HD
-#define STREAM_JPEG_QUALITY   11
-/* 检测分辨率 (灰度, 检测算法开销 O(W*H), QVGA 在 S3 上单帧约几十 ms) */
-#define ALIGN_DETECT_FRAMESIZE  FRAMESIZE_QVGA
+/* 流媒体分辨率/画质 (MJPEG 硬编码)
+ * 固定 VGA 不再运行时切换: 切 framesize 会重置 GC2145 寄存器与 GDMA 链,
+ * 正在推流的帧被截断(丢 EOI), WebView 的 MJPEG 解码器会定格,
+ * 且画面尺寸跳变本身就不满足"检测时画面不变"的要求。
+ * 检测侧用 esp_jpeg_decode 的 1/2 缩放直接从 VGA 解出 320x240。 */
+#define STREAM_FRAMESIZE      FRAMESIZE_VGA
+#define STREAM_JPEG_QUALITY   12
+#define STREAM_FB_COUNT       3      /* 3 缓冲: 推流与后台检测并发取帧时不至于 DMA 停摆 */
+/* ---- 检测分辨率 (固定, 不再是运行时的另一种相机模式) ----
+ * VGA 帧经 JPEG_IMAGE_SCALE_1_2 解码后正好是 320x240,
+ * tag_detector 的像素参数(EDGE_PX_MIN/ADAPT_WIN)全部沿用不变。 */
+#define ALIGN_DETECT_W          320
+#define ALIGN_DETECT_H          240
 
 /* ---- AprilTag / 视觉纠偏几何参数 (与 code/tag_utils.py 保持一致) ---- */
 #define TAG_REAL_MM       50.0f  /* 标签黑框真实边长(mm), 打印后实测填入 */
@@ -39,7 +58,7 @@
 #define TAG_ID            0      /* 使用的标签 ID */
 
 /* ---- 检测器参数 ---- */
-#define DET_EDGE_PX_MIN   24     /* 标签黑框边长像素下限 (QVGA 下的预期范围) */
+#define DET_EDGE_PX_MIN   12     /* 黑框边长像素下限; 12px 支持放远约 2 倍距离 */
 #define DET_EDGE_PX_MAX   200    /* 标签黑框边长像素上限 */
 #define DET_MAX_HAMMING   1      /* 解码允许的最大汉明距离 */
 #define DET_CONTRAST_MIN  25.0f  /* 黑白电平最小对比度 (抗全黑/全白误检) */

@@ -12,6 +12,8 @@
   var STREAM_PORT = 81;
   var RETRY_MS = 3000;
   var RETRY_LIMIT = 3;
+  var CONNECT_TIMEOUT_MS = 8000;   /* 首帧等待上限, 超时重连避免永远卡在"连接中" */
+  var DETECT_TIMEOUT_MS = 20000;   /* 检测模式下的首帧等待上限: 纠偏检测会切 QVGA, 出帧变慢但不代表地址失效 */
   var STORAGE_KEY = { host: "wallbot.camHost", child: "wallbot.camChild" };
 
   function loadSavedIp(key) {
@@ -45,8 +47,11 @@
     this.placeholder = null;
     this.retryTimer = null;
     this.retryCount = 0;
+    this.detectMode = false;   /* true: 纠偏检测中, 首帧超时/重连不计失败, 不触发重新发现 */
   }
 
+  /* 纯图像反馈版本: 子机与母机都走 :81/stream 普通 MJPEG
+   * (检测可视化 /view 暂时停用, 用于验证基础链路) */
   Channel.prototype.streamUrl = function () {
     if (!this.ip) return "";
     var ip = this.ip.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
@@ -62,6 +67,10 @@
 
   Channel.prototype._clearRetry = function () {
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+  };
+
+  Channel.prototype._clearConnectTimeout = function () {
+    if (this._connectTimer) { clearTimeout(this._connectTimer); this._connectTimer = null; }
   };
 
   Channel.prototype._removeMedia = function () {
@@ -89,6 +98,15 @@
   Channel.prototype._scheduleRetry = function () {
     var self = this;
     this._clearRetry();
+    /* 检测模式下流会短暂停顿(传感器切 QVGA), 这不是地址失效:
+     * 重连计数不累加, 用短间隔快速恢复画面。 */
+    if (this.detectMode || (this.key === "child" && this._softPause)) {
+      this._softPause = false;
+      this.retryCount = 0;
+      this._setBadge("检测中…", "off");
+      this.retryTimer = setTimeout(function () { self.connect(); }, 1500);
+      return;
+    }
     if (this.retryCount >= RETRY_LIMIT) {
       /* 缓存地址失效: 通知 App 触发重新发现 */
       if (this.app && typeof this.app._onCameraGiveUp === "function") this.app._onCameraGiveUp(this.key);
@@ -118,6 +136,15 @@
     this._setBadge("未接入", "off");
   };
 
+  /* 检测模式导致的流停顿: 标记后立即重连, 不计入失败次数 */
+  Channel.prototype.softReconnect = function () {
+    if (!this.card || !this.img) return;
+    this._softPause = true;
+    this._removeMedia();
+    this._hidePlaceholder();
+    this.connect();
+  };
+
   Channel.prototype.connect = function () {
     if (!this.card) return;
     this._clearRetry();
@@ -134,15 +161,30 @@
     var img = UI.el("img", { src: url, alt: "摄像头回传" });
     UI.log("[cam] connect " + this.key + " url=" + url);
     img.onload = function () {
+      self._clearConnectTimeout();
       self.retryCount = 0;
       self._setBadge("已接入", "on");
       UI.log("[cam] OK " + self.key);
     };
     img.onerror = function () {
+      self._clearConnectTimeout();
       self._setBadge("连接失败", "off");
       UI.log("[cam] FAIL " + self.key + " " + url);
       self._scheduleRetry();
     };
+    /* 超时仍未出帧就重连一次, 避免永远卡在"连接中" */
+    this._clearConnectTimeout();
+    this._connectTimer = setTimeout(function () {
+      if (!self.img || self.img !== img) return;
+      if (self.detectMode) {
+        /* 检测模式下流仍在线, 只是出帧慢: 不重连, 避免把 retryCount 推满后清 IP */
+        UI.log("[cam] " + self.key + " 检测模式首帧慢, 保持连接");
+        return;
+      }
+      UI.log("[cam] " + self.key + " 首帧超时, 重连");
+      self._setBadge("等待画面", "off");
+      self.connect();
+    }, this.detectMode ? DETECT_TIMEOUT_MS : CONNECT_TIMEOUT_MS);
     this.card.appendChild(img);
     this.img = img;
 
@@ -152,6 +194,7 @@
 
   Channel.prototype.disconnect = function () {
     this._clearRetry();
+    this._clearConnectTimeout();
     this._removeMedia();
     this._showPlaceholder();
     this._setBadge("未接入", "off");
@@ -171,6 +214,19 @@
     this.channels.forEach(function (ch) { if (!ch.img) ch.connect(); });
   };
 
+  /* 地址变更订阅: fn(key, ip) — 供纠偏等模块复用自动发现结果 */
+  CameraModule.prototype.onIpChange = function (fn) {
+    if (typeof fn !== "function") return;
+    (this._ipListeners || (this._ipListeners = [])).push(fn);
+  };
+
+  CameraModule.prototype._emitIp = function (key, ip) {
+    var list = this._ipListeners || [];
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](key, ip); } catch (e) {}
+    }
+  };
+
   /* 自动发现结果写入; 已有地址变化时断开并重连 */
   CameraModule.prototype.setIp = function (key, ip) {
     var ch = this.channels.filter(function (c) { return c.key === key; })[0];
@@ -179,6 +235,7 @@
     ch.retryCount = 0;
     saveIp(key, ip);
     if (ch.img) { ch.disconnect(); ch.connect(); }
+    this._emitIp(key, ip);
   };
 
   CameraModule.prototype.clearIp = function (key) {
@@ -187,10 +244,28 @@
     ch.ip = "";
     ch.retryCount = 0;
     saveIp(key, "");
+    this._emitIp(key, "");
   };
 
   CameraModule.prototype.disconnect = function () {
     this.channels.forEach(function (ch) { ch.disconnect(); });
+  };
+
+  /* 视觉纠偏请求前调用: 主动重连子机流, 避免检测切模式时残留半帧 */
+  CameraModule.prototype.softReconnect = function (key) {
+    var ch = this.channels.filter(function (c) { return c.key === key; })[0];
+    if (ch) ch.softReconnect();
+  };
+
+  /* 纠偏检测开关: 检测期间放宽超时与重试, 不因出帧慢判定地址失效 */
+  CameraModule.prototype.setDetectMode = function (key, on) {
+    var ch = this.channels.filter(function (c) { return c.key === key; })[0];
+    if (!ch) return;
+    ch.detectMode = !!on;
+    if (on) {
+      ch.retryCount = 0;
+      ch._clearRetry();
+    }
   };
 
   CameraModule.prototype.getIp = function (key) {

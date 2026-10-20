@@ -12,4 +12,7 @@
 
 bool StreamServer_Start(void);   /* 启动 :80 控制服务 + :81 流服务 */
 
+/* 写入日志环形缓冲 (App 通过 GET /log 拉取, 替代串口) */
+void Stream_Log(const char *fmt, ...);
+
 #endif /* WALLBOT_STREAM_SERVER_H */

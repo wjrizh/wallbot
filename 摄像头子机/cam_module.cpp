@@ -1,8 +1,11 @@
 /* cam_module.cpp - 摄像头初始化 / 检测模式切换 / 诊断信息 */
 #include <Arduino.h>
 #include "esp_camera.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "config.h"
 #include "cam_module.h"
+#include "stream_server.h"
 
 /* ---- Camera pins: CAMERA_MODEL_ESP32S3_EYE ---- */
 #define PWDN_GPIO_NUM   -1
@@ -29,6 +32,10 @@ static bool    s_jpeg_ok = false;
 static int     s_sensor_pid = -1;
 static uint32_t s_init_ms = 0;
 static bool    s_detect_mode = false;
+static int     s_detect_refs = 0;   /* 检测模式引用计数: /view 与 /align/* 可能同时占用 */
+/* /view(:81) 与 /align/*(:80) 在不同 httpd 任务里并发调用 enter/exit,
+ * 引用计数必须原子更新, 否则计数丢失会让分辨率卡在 QVGA。 */
+static portMUX_TYPE s_mode_mux = portMUX_INITIALIZER_UNLOCKED;
 
 bool Cam_IsOk(void)        { return s_cam_ok; }
 int  Cam_Err(void)         { return s_cam_err; }
@@ -62,7 +69,7 @@ void Cam_Init(void) {
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size = STREAM_FRAMESIZE;
     config.jpeg_quality = STREAM_JPEG_QUALITY;
-    config.fb_count = 2;
+    config.fb_count = STREAM_FB_COUNT;
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_LATEST;
 
@@ -97,27 +104,42 @@ void Cam_Init(void) {
     else s_cam_err2 = (int)ESP_FAIL;
 }
 
-/* 切到灰度低分辨率检测模式 */
+/* 检测模式: 只切分辨率 (像素格式保持 JPEG 不变!)
+ * 原因: esp32-camera 的 DMA 解析模式在初始化时按 JPEG 定死,
+ *       运行时刻 set_pixformat 会导致驱动仍按 JPEG 解析灰度数据 -> 全是坏帧。
+ * 引用计数: 多路(/view 与 /align/*)同时请求只切一次, 全部释放才切回。 */
 bool Cam_EnterDetectMode(void) {
-    if (!s_cam_ok || s_detect_mode) return s_cam_ok;
-    sensor_t *s = esp_camera_sensor_get();
-    if (!s) return false;
-    s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
-    s->set_framesize(s, ALIGN_DETECT_FRAMESIZE);
-    s_detect_mode = true;
-    Cam_FlushFrames(6, 30);   // 等 AEC/AGC 收敛
+    if (!s_cam_ok) return false;
+    bool need_switch = false;
+    portENTER_CRITICAL(&s_mode_mux);
+    if (s_detect_mode) {
+        s_detect_refs++;
+    } else {
+        s_detect_mode = true;
+        s_detect_refs = 1;
+        need_switch = true;
+    }
+    portEXIT_CRITICAL(&s_mode_mux);
+    if (!need_switch) return true;
+
+    /* 不再切 framesize: 分辨率固定 VGA, 检测侧靠解码缩放得到 320x240。
+     * 这里只是把"当前有检测使用者"的状态记下来, 供诊断页展示。 */
+    Stream_Log("detect mode ON (vga fixed)");
     return true;
 }
 
 void Cam_ExitDetectMode(void) {
-    if (!s_detect_mode) return;
-    sensor_t *s = esp_camera_sensor_get();
-    if (s) {
-        s->set_pixformat(s, PIXFORMAT_JPEG);
-        s->set_framesize(s, STREAM_FRAMESIZE);
+    bool released = false;
+    portENTER_CRITICAL(&s_mode_mux);
+    if (s_detect_mode) {
+        if (s_detect_refs > 0) s_detect_refs--;
+        if (s_detect_refs == 0) {
+            s_detect_mode = false;
+            released = true;
+        }
     }
-    s_detect_mode = false;
-    Cam_FlushFrames(4, 30);
+    portEXIT_CRITICAL(&s_mode_mux);
+    if (released) Stream_Log("detect mode OFF");
 }
 
 void Cam_FlushFrames(int n, int delay_ms) {

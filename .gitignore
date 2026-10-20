@@ -45,3 +45,7 @@ rs02_csp_quintic.ino
 *.tel
 ACK闭环测试表.md
 Netlist_Schematic1_2026-09-22.tel
+# 摄像头子机编译产物
+摄像头子机/*.bin
+摄像头子机/*.elf
+摄像头子机/*.map

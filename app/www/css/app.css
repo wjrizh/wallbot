@@ -978,3 +978,92 @@ body,.panel,.panel-child,.stage,.stage-child{
 .coop-dir-stop{background:var(--gray2,#e5e5ea);font-size:20px;}
 .coop-dir-stop:active{background:rgba(255,69,58,.2);color:#ff453a;}
 .coop-step2.disabled{opacity:.4;pointer-events:none;}
+
+/* ===== 视觉纠偏抽屉 =====
+ * 布局策略: 抽屉固定定位; 打开时给 body 右侧留安全区, 由 .app 的
+ * padding-right 让整个界面(含摄像头)一起收窄。
+ * 不用 camera-dock 的 margin: 它是 flex 子项, margin 会挤压内部导致错位。
+ * 窄屏改为底部上滑面板, 摄像头留在上半屏可见。
+ */
+.align-drawer{
+  position:fixed;
+  top:0;right:0;bottom:0;
+  width:400px;max-width:92vw;
+  background:var(--panel);
+  box-shadow:-8px 0 32px rgba(0,0,0,.22);
+  transform:translateX(105%);
+  transition:transform .24s cubic-bezier(.22,.61,.36,1);
+  z-index:95;
+  display:flex;flex-direction:column;
+  pointer-events:none;
+  visibility:hidden;
+}
+.align-drawer.show{transform:none;pointer-events:auto;visibility:visible;}
+.align-drawer .debug-head{flex:0 0 auto;}
+.align-drawer .align-body{
+  flex:1 1 auto;overflow-y:auto;
+  padding:14px 18px 24px;
+  -webkit-overflow-scrolling:touch;
+}
+
+/* 宽屏: 界面整体右侧让位 */
+body.align-open{padding-right:400px;}
+body.align-open .seg{right:412px;}
+
+@media (max-width:900px){
+  .align-drawer{width:340px;}
+  body.align-open{padding-right:340px;}
+  body.align-open .seg{right:352px;}
+}
+
+/* 窄屏: 抽屉改为底部面板, 摄像头留在上半屏 */
+@media (max-width:640px){
+  .align-drawer{
+    top:auto;left:0;right:0;bottom:0;
+    width:100%;max-width:100%;height:56vh;
+    border-radius:var(--radius) var(--radius) 0 0;
+    transform:translateY(105%);
+  }
+  .align-drawer.show{transform:none;}
+  body.align-open{padding-right:0;padding-bottom:56vh;}
+  body.align-open .seg{right:20px;}
+}
+
+.align-note{
+  font-size:12px;line-height:1.5;color:#8e8e93;
+  background:rgba(118,118,128,.10);
+  border-radius:10px;padding:8px 10px;margin:6px 0 12px;
+}
+.align-row{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:10px;padding:7px 0;border-bottom:1px solid var(--sep);
+  font-size:14px;
+}
+.align-row:last-child{border-bottom:none;}
+.align-row .align-k{color:#8e8e93;flex:0 0 auto;}
+.align-row .align-v{font-variant-numeric:tabular-nums;font-weight:600;text-align:right;}
+
+/* 摄像头端日志区 */
+.align-log{
+  margin-top:10px;
+  max-height:170px;overflow-y:auto;
+  background:#1c1c1e;color:#d1d1d6;
+  border-radius:10px;padding:8px 10px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:11px;line-height:1.45;
+  white-space:pre-wrap;word-break:break-all;
+}
+.align-log-line{display:block;}
+.align-log-line.err{color:#ff6961;}
+.align-log-line.warn{color:#ffd479;}
+
+/* 检测可视化流 (/view): 灰度帧 + 板端叠加的候选框与诊断文字 */
+.align-view{
+  display:block;
+  width:100%;
+  aspect-ratio:4 / 3;
+  background:#111;
+  border-radius:10px;
+  object-fit:contain;
+  margin-top:4px;
+}

@@ -23,8 +23,30 @@ typedef struct {
     float contrast;           /* 白黑电平差 */
 } TagObservation;
 
-/* 在灰度图中检测 TAG_ID 标签; 找到返回 true 并填充 out */
+/* 诊断信息: 检测失败时也能看出卡在哪一步 (供 /align/view 叠加显示) */
+typedef struct {
+    int  ncomps;          /* 连通域数量 */
+    int  ncand;           /* 通过面积初筛的候选数 */
+    int  cand_bbox[4];    /* 最大候选包围盒 x,y,w,h (无候选时全 0) */
+    int  cand_area;
+    float cand_fill;      /* 面积/包围盒面积 */
+    int  drop_small;      /* 因太小被丢弃的候选数 */
+    int  drop_large;      /* 因太大被丢弃 */
+    int  drop_fill;       /* 因填充率不符被丢弃 */
+    int  drop_aspect;     /* 因长宽比不符被丢弃 */
+    int  decode_tried;    /* 实际尝试解码的候选数 */
+    int  best_hamming;    /* 尝试过的最优汉明距离 (255=未尝试) */
+    float best_contrast;  /* 最优候选的对比度 */
+    float best_margin;
+    int  stage;           /* 失败阶段: 0=ok 1=无连通域 2=候选全被筛掉 3=解码失败 */
+} TagDiag;
+
+/* 在灰度图中检测 TAG_ID 标签; 找到返回 true 并填充 out。
+ * diag 可为 NULL; 非 NULL 时无论成功失败都填充诊断信息。 */
 bool TagDetector_Detect(const uint8_t *gray, int w, int h, int stride,
                         TagObservation *out);
+
+bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                          TagObservation *out, TagDiag *diag);
 
 #endif /* WALLBOT_TAG_DETECTOR_H */

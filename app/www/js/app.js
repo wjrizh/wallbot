@@ -229,6 +229,11 @@
     return this.modules.filter(function (m) { return m instanceof CameraModule; })[0];
   };
 
+  /* 公开摄像头模块: 供其他模块复用自动发现的摄像头地址 */
+  Object.defineProperty(App.prototype, 'camera', {
+    get: function () { return this._cameraModule() || null; }
+  });
+
   App.prototype._loadSavedHost = function () {
     try {
       var saved = global.localStorage && global.localStorage.getItem(HOST_STORAGE_KEY);
@@ -282,7 +287,13 @@
     if (this._discoverTimer) clearTimeout(this._discoverTimer);
     this._discoverTimer = setTimeout(function () {
       self._discoverTimer = null;
-      if (self.transport.isOnline()) return;
+      /* 母机 WS 在线, 或任一路摄像头画面仍在, 都不该盲目重扫:
+       * 重扫会重建整个发现流程, 把正在工作的子机 IP 一起搅乱。 */
+      var cam = self._cameraModule();
+      var camActive = cam && cam.channels && cam.channels.some(function (ch) {
+        return !!ch.img;
+      });
+      if (self.transport.isOnline() || camActive) return;
       UI.log('[发现] 缓存地址未连通, 重新扫描');
       self._autoDiscover('缓存失效');
     }, delay);
@@ -304,11 +315,23 @@
     this._scheduleDiscoverFallback(everOnline ? 3000 : 1000);
   };
 
-  /* 某路摄像头重试耗尽: 清掉该路缓存并重新发现 */
+  /* 某路摄像头重试耗尽: 清掉该路缓存并重新发现
+   * 例外: 该路处于纠偏检测模式时, 出帧慢/首帧超时是正常的, 绝不清 IP */
   App.prototype._onCameraGiveUp = function (key) {
+    var cam = this._cameraModule();
+    var ch = null;
+    if (cam && cam.channels) {
+      for (var i = 0; i < cam.channels.length; i++) {
+        if (cam.channels[i].key === key) { ch = cam.channels[i]; break; }
+      }
+    }
+    if (ch && ch.detectMode) {
+      ch.retryCount = 0;
+      ch.connect();
+      return;
+    }
     if (this._camGiveUp[key]) return;
     this._camGiveUp[key] = true;
-    var cam = this._cameraModule();
     if (cam) cam.clearIp(key);
     UI.log('[发现] 摄像头[' + key + '] 地址失效, 重新扫描');
     this._autoDiscover('摄像头地址失效');

@@ -26,8 +26,10 @@
 typedef struct {
     int32_t area;
     int16_t minx, maxx, miny, maxy;
-    double  sx, sy, sxx, syy, sxy;
+    int64_t sx, sy, sxx, syy, sxy;
 } CompStat;
+
+/* 候选连通域: 4096 个 x 8B = 32KB, 必须放 PSRAM, 不能放栈上 */
 
 /* ================= 工作区 (按尺寸惰性分配复用) ================= */
 typedef struct {
@@ -38,6 +40,7 @@ typedef struct {
     uint16_t *parent;  /* 并查集 */
     CompStat *stats;   /* 暗域统计 */
     uint16_t (*wbbox)[4]; /* 白域包围盒 (填洞用) */
+    Cand     *cands;   /* 候选数组 (PSRAM) */
 } Scratch;
 
 static Scratch g_sc;
@@ -52,7 +55,7 @@ static void *psram_malloc(size_t n) {
 static bool scratch_ensure(int w, int h) {
     if (g_sc.w == w && g_sc.h == h) return true;
     free(g_sc.ii); free(g_sc.bin); free(g_sc.lab); free(g_sc.parent);
-    free(g_sc.stats); free(g_sc.wbbox);
+    free(g_sc.stats); free(g_sc.wbbox); free(g_sc.cands);
     memset(&g_sc, 0, sizeof(g_sc));
     g_sc.ii     = (uint32_t *)psram_malloc((size_t)(w + 1) * (h + 1) * 4);
     g_sc.bin    = (uint8_t *)psram_malloc((size_t)w * h);
@@ -60,10 +63,11 @@ static bool scratch_ensure(int w, int h) {
     g_sc.parent = (uint16_t *)psram_malloc((size_t)w * h * 2);
     g_sc.stats  = (CompStat *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(CompStat));
     g_sc.wbbox  = (uint16_t (*)[4])psram_malloc((size_t)DET_MAX_COMPS * 4 * 2);
+    g_sc.cands  = (Cand *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(Cand));
     if (!g_sc.ii || !g_sc.bin || !g_sc.lab || !g_sc.parent ||
-        !g_sc.stats || !g_sc.wbbox) {
+        !g_sc.stats || !g_sc.wbbox || !g_sc.cands) {
         free(g_sc.ii); free(g_sc.bin); free(g_sc.lab); free(g_sc.parent);
-        free(g_sc.stats); free(g_sc.wbbox);
+        free(g_sc.stats); free(g_sc.wbbox); free(g_sc.cands);
         memset(&g_sc, 0, sizeof(g_sc));
         return false;
     }
@@ -244,11 +248,11 @@ static void label_components(int w, int h) {
             lrow[x] = r;
             if (r >= DET_MAX_COMPS) continue;   /* 超上限的域不统计 */
             CompStat *st = &g_sc.stats[r];
-            double fx = x, fy = y;
+            int64_t ix = x, iy = y;
             if (st->area == 0) { st->minx = st->maxx = x; st->miny = st->maxy = y; }
             st->area++;
-            st->sx += fx; st->sy += fy;
-            st->sxx += fx * fx; st->syy += fy * fy; st->sxy += fx * fy;
+            st->sx += ix; st->sy += iy;
+            st->sxx += ix * ix; st->syy += iy * iy; st->sxy += ix * iy;
             if (x < st->minx) st->minx = x;
             if (x > st->maxx) st->maxx = x;
             if (y < st->miny) st->miny = y;
@@ -530,7 +534,7 @@ static int cand_cmp(const void *a, const void *b) {
 
 static bool comp_extremes(const CompStat *st, uint16_t id, int w, int h, float P[4][2]) {
     /* 主轴方向 u, 对角方向 d1 = u+v, d2 = u-v; 4 角点 = d1/d2 的极值点 */
-    double cx = st->sx / st->area, cy = st->sy / st->area;
+    double cx = (double)st->sx / st->area, cy = (double)st->sy / st->area;
     double mu20 = st->sxx / st->area - cx * cx;
     double mu02 = st->syy / st->area - cy * cy;
     double mu11 = st->sxy / st->area - cx * cy;
@@ -563,18 +567,30 @@ static bool comp_extremes(const CompStat *st, uint16_t id, int w, int h, float P
 
 /* ================= 对外入口 ================= */
 bool TagDetector_Detect(const uint8_t *gray, int w, int h, int stride, TagObservation *out) {
+    return TagDetector_DetectEx(gray, w, h, stride, out, NULL);
+}
+
+bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                          TagObservation *out, TagDiag *diag) {
     memset(out, 0, sizeof(*out));
     out->ok = false;
+    if (diag) {
+        memset(diag, 0, sizeof(*diag));
+        diag->best_hamming = 255;
+        diag->stage = 1;
+    }
     if (!gray || w <= 0 || h <= 0) return false;
     if (!scratch_ensure(w, h)) return false;
 
     threshold_adaptive(gray, w, h, stride);
     fill_holes(w, h);
     label_components(w, h);
+    if (diag) diag->ncomps = g_ncomps;
     if (g_ncomps == 0) return false;
 
     /* 按面积取前几个候选 */
-    Cand cands[DET_MAX_COMPS];
+    Cand *cands = g_sc.cands;
+    if (!cands) return false;
     int ncand = 0;
     for (int i = 1; i < DET_MAX_COMPS && i < 65535; i++) {
         if (g_sc.stats[i].area > 0) {
@@ -585,6 +601,18 @@ bool TagDetector_Detect(const uint8_t *gray, int w, int h, int stride, TagObserv
     }
     if (ncand == 0) return false;
     qsort(cands, ncand, sizeof(Cand), cand_cmp);
+    if (diag) {
+        diag->ncand = ncand;
+        const CompStat *top = &g_sc.stats[cands[0].id];
+        diag->cand_bbox[0] = top->minx;
+        diag->cand_bbox[1] = top->miny;
+        diag->cand_bbox[2] = top->maxx - top->minx + 1;
+        diag->cand_bbox[3] = top->maxy - top->miny + 1;
+        diag->cand_area = (int)top->area;
+        int bw0 = top->maxx - top->minx + 1, bh0 = top->maxy - top->miny + 1;
+        diag->cand_fill = (bw0 > 0 && bh0 > 0) ? (float)top->area / (float)(bw0 * bh0) : 0.0f;
+        diag->stage = 2;
+    }
     if (ncand > DET_MAX_CANDS) ncand = DET_MAX_CANDS;
 
     TagObservation best;
@@ -600,36 +628,29 @@ bool TagDetector_Detect(const uint8_t *gray, int w, int h, int stride, TagObserv
                 (double)st->area / (bw * bh));
 #endif
         if (bw < 0.7f * DET_EDGE_PX_MIN || bh < 0.7f * DET_EDGE_PX_MIN) {
-#ifdef DET_DEBUG
-            fprintf(stderr, "  -> drop: bbox < min_edge\n");
-#endif
+            if (diag) diag->drop_small++;
             continue;
         }
         if (bw > 1.6f * DET_EDGE_PX_MAX || bh > 1.6f * DET_EDGE_PX_MAX) {
-#ifdef DET_DEBUG
-            fprintf(stderr, "  -> drop: bbox > max_edge\n");
-#endif
+            if (diag) diag->drop_large++;
             continue;
         }
         double fill = (double)st->area / (bw * bh);
         /* 下限 0.15: 环带形态(黑框+暗位连不齐)约 0.2+, 细碎轮廓线 <0.1;
          * 上限 0.99: 填洞后是实心方块 (正对时 fill≈0.98) */
         if (fill < 0.15 || fill > 0.99) {
-#ifdef DET_DEBUG
-            fprintf(stderr, "  -> drop: fill %.2f out of [0.15,0.99]\n", fill);
-#endif
+            if (diag) diag->drop_fill++;
             continue;
         }
         double ar = bw / bh;
         if (ar < 0.4 || ar > 2.5) {
-#ifdef DET_DEBUG
-            fprintf(stderr, "  -> drop: aspect %.2f\n", ar);
-#endif
+            if (diag) diag->drop_aspect++;
             continue;
         }
+        if (diag) diag->decode_tried++;
 
         float P[4][2];
-        float centroid[2] = {(float)(st->sx / st->area), (float)(st->sy / st->area)};
+        float centroid[2] = {(float)((double)st->sx / st->area), (float)((double)st->sy / st->area)};
         if (!comp_extremes(st, cands[ci].id, w, h, P)) continue;
 
         /* 角点按绕形心方位角排序, 得到一致环序 */
@@ -662,15 +683,21 @@ bool TagDetector_Detect(const uint8_t *gray, int w, int h, int stride, TagObserv
                 }
                 TagObservation o;
                 int ham = decode_attempt(gray, w, h, stride, A, &o);
-#ifdef DET_DEBUG
-                fprintf(stderr, "  -> decode ori=%d r=%d ham=%d\n", ori, r, ham);
-#endif
+                if (diag && ham < diag->best_hamming) {
+                    diag->best_hamming = ham;
+                    diag->best_contrast = o.contrast;
+                    diag->best_margin = o.margin;
+                }
                 if (ham < best_h) { best_h = ham; best = o; }
             }
         }
     }
 
-    if (best_h > DET_MAX_HAMMING) return false;
+    if (best_h > DET_MAX_HAMMING) {
+        if (diag) diag->stage = (diag->decode_tried > 0) ? 3 : 2;
+        return false;
+    }
+    if (diag) diag->stage = 0;
     *out = best;
     return true;
 }
