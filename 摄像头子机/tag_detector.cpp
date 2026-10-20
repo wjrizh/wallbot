@@ -31,6 +31,7 @@ typedef struct {
 
 /* 候选连通域: 4096 个 x 8B = 32KB, 必须放 PSRAM, 不能放栈上 */
 
+typedef struct { int id; int32_t area; } Cand;
 /* ================= 工作区 (按尺寸惰性分配复用) ================= */
 typedef struct {
     int      w, h;
@@ -526,7 +527,7 @@ static void refine_corners(const uint8_t *im, int w, int h, int stride,
 }
 
 /* ================= 候选 -> 角点 -> 解码 ================= */
-typedef struct { int id; int32_t area; } Cand;
+
 
 static int cand_cmp(const void *a, const void *b) {
     return ((const Cand *)b)->area - ((const Cand *)a)->area;
