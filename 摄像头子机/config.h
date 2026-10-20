@@ -28,13 +28,14 @@
 /* 流媒体分辨率/画质 (MJPEG 硬编码) */
 #define STREAM_FRAMESIZE      FRAMESIZE_HD
 #define STREAM_JPEG_QUALITY   11
-/* ---- 检测分辨率 (检测模式只切分辨率, 保持 JPEG; 板上解码为灰度后检测) ---- */
-#define ALIGN_DETECT_FRAMESIZE  FRAMESIZE_QVGA
-#define ALIGN_DETECT_W          320   /* FRAMESIZE_QVGA 对应的宽 */
-#define ALIGN_DETECT_H          240   /* FRAMESIZE_QVGA 对应的高 */
+/* ---- 检测分辨率 (检测模式只切分辨率, 保持 JPEG; 板上解码为灰度后检测) ----
+ * 标签22mm较小: 用HVGA(480x320)保证标签边长像素充足(距夹爪25cm约33px) */
+#define ALIGN_DETECT_FRAMESIZE  FRAMESIZE_HVGA
+#define ALIGN_DETECT_W          480   /* FRAMESIZE_HVGA 对应的宽 */
+#define ALIGN_DETECT_H          320   /* FRAMESIZE_HVGA 对应的高 */
 
 /* ---- AprilTag / 视觉纠偏几何参数 (与 code/tag_utils.py 保持一致) ---- */
-#define TAG_REAL_MM       50.0f  /* 标签黑框真实边长(mm), 打印后实测填入 */
+#define TAG_REAL_MM       22.0f  /* 标签黑框真实边长(mm), 打印后实测填入 (实测22mm) */
 #define R_TAG_MM          60.0f  /* 标签黑框中心平面到管道轴线的垂直距离(mm), 贴好后必须实测 */
 #define PIPE_RADIUS_MM    60.0f  /* 管道内半径(mm), 仅用于把 phi 换算成沿管壁弧长 */
 
