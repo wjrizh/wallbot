@@ -22,6 +22,9 @@
 #include "gripper.h"
 #include "imu_driver.h"
 #include "laser_tof.h"
+#include "test_mode.h"
+
+static void onTestTelemetry(const uint8_t* f, uint8_t len);
 
 bool g_imu_online = false;
 static uint8_t g_imu_fail_count = 0;
@@ -226,6 +229,27 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
                 GaitEngine_ConfirmNext();
                 break;
             }
+            /* ===== 视觉纠偏测试 (无摄像头, 假偏差下发) ===== */
+            /* 0x30 开始测试 */
+            case 0x30: {
+                TestMode_Start();
+                break;
+            }
+            /* 0x31 下发假偏差: phi(4 floatLE) psi(4) ax(4) */
+            case 0x31: {
+                if (pay_len < 12 || !p) { code = 1; break; }
+                float phi, psi, ax;
+                memcpy(&phi, &p[0], 4);
+                memcpy(&psi, &p[4], 4);
+                memcpy(&ax,  &p[8], 4);
+                TestMode_SendAdj(phi, psi, ax);
+                break;
+            }
+            /* 0x32 结束测试 */
+            case 0x32: {
+                TestMode_Stop();
+                break;
+            }
             /* ===== NRF手柄 + 子母协同 → 协议模块 (内部已回执) ===== */
             case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1D:
             case 0x20: case 0x21: case 0x22: case 0x23: {
@@ -280,6 +304,8 @@ void WebServer_Init(void) {
 
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
+
+    TestMode_SetTelemetrySink(onTestTelemetry);
 
     /* 只保存 WS 通道, 无内部页：网页根路径回应数据 */
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -348,6 +374,37 @@ void WebServer_PushLaser(void) {
     frame[37] = (crc >> 8) & 0xFF;
 
     ws.binaryAll(frame, 38);
+}
+
+/* 子机轮子运动遥测 'J' -> App (0x86) */
+static void onTestTelemetry(const uint8_t* f, uint8_t len) {
+    if (ws.count() == 0) return;
+    uint8_t frame[2 + 1 + 1 + 32 + 2];
+    frame[0] = 0xAA; frame[1] = 0x55;
+    frame[2] = 0x86;
+    frame[3] = len;
+    memcpy(&frame[4], f, len);
+    uint16_t crc = crc16(frame, 4 + len);
+    frame[4 + len] = crc & 0xFF;
+    frame[5 + len] = (crc >> 8) & 0xFF;
+    ws.binaryAll(frame, 6 + len);
+}
+
+/* 测试状态帧 (0x87): [state][round][last_rc][buf] */
+void WebServer_PushTestStatus(void) {
+    if (ws.count() == 0) return;
+    uint8_t st, rd, rc;
+    TestMode_GetStatus(&st, &rd, &rc);
+    uint8_t pay[3] = {st, rd, rc};
+    uint8_t frame[2 + 1 + 1 + 3 + 2];
+    frame[0] = 0xAA; frame[1] = 0x55;
+    frame[2] = 0x87;
+    frame[3] = 3;
+    memcpy(&frame[4], pay, 3);
+    uint16_t crc = crc16(frame, 7);
+    frame[7] = crc & 0xFF;
+    frame[8] = (crc >> 8) & 0xFF;
+    ws.binaryAll(frame, 9);
 }
 
 void WebServer_SendLog(const char* msg) {

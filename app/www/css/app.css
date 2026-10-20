@@ -1067,3 +1067,42 @@ body.align-open .seg{right:412px;}
   object-fit:contain;
   margin-top:4px;
 }
+
+/* ==================== 视觉纠偏测试面板 ==================== */
+.at-ctrl{display:flex;gap:8px;margin:8px 0 12px;}
+.at-ctrl .btn{flex:1 1 0;}
+
+.at-canvas{
+  display:block;width:100%;height:auto;
+  background:#111;border-radius:10px;margin-top:6px;
+}
+
+.at-legend{display:flex;gap:14px;font-size:11px;margin-top:6px;}
+.at-lg-phi{color:#4a90d9;}
+.at-lg-psi{color:#e08b2e;}
+.at-lg-ax{color:#9b59b6;}
+
+.at-form{display:flex;flex-direction:column;gap:6px;margin-top:8px;}
+.at-form-row{display:flex;align-items:center;gap:8px;}
+.at-form-k{flex:0 0 72px;font-size:13px;color:#8e8e93;}
+.at-form-in{flex:1 1 auto;max-width:120px;}
+.at-form-u{flex:0 0 auto;font-size:12px;color:#8e8e93;}
+
+.at-presets{display:flex;gap:8px;margin-top:8px;}
+.at-preset{flex:1 1 0;padding:6px 0;font-size:13px;}
+
+.at-stage{
+  margin-top:8px;background:rgba(118,118,128,.08);
+  border-radius:10px;padding:8px 10px;
+  font-size:12px;line-height:1.7;
+}
+.at-stage-row{white-space:pre-wrap;}
+.at-stage-row b{color:#2e9e4f;}
+.at-bar{
+  height:6px;background:rgba(118,118,128,.18);
+  border-radius:3px;overflow:hidden;margin-top:4px;
+}
+.at-bar > i{display:block;height:100%;background:#4a90d9;transition:width .2s linear;}
+
+.at-real{margin-top:16px;font-size:13px;color:#8e8e93;}
+.at-real summary{cursor:pointer;padding:6px 0;}

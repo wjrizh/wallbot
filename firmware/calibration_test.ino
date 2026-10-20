@@ -10,7 +10,8 @@
 #include "auto_align.h"
 #include "protocol.h"         // 新增
 #include "joypad_sender.h"    // 新增
-#include "auto_mode.h"        // 新增
+#include "auto_mode.h"
+#include "test_mode.h"        // 新增
 #include "gripper.h"
 #include "web_server.h"
 #include "laser_tof.h"
@@ -31,6 +32,7 @@ static void Task_PushLaser(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
         WebServer_PushLaser();
+        WebServer_PushTestStatus();
         AlignBridge_Tick();   /* 视觉纠偏闭环 (HTTP 拉取, 内部按 500ms 节流) */
     }
 }
@@ -111,6 +113,7 @@ void setup() {
     /* 4.9 NRF + 虚拟手柄 (子母协同时启用) */
     JoypadSender_Init();
     AutoMode_Init();
+    TestMode_Init();
 xTaskCreate(JoypadSender_Task, "JoypadSend", 4096, NULL, 2, NULL);
 
     /* 6. 推送任务 */

@@ -3,6 +3,7 @@
 #include "nrf_sender.h"
 #include "auto_mode.h"
 #include "child_cmd.h"
+#include "test_mode.h"
 #include "config.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -79,12 +80,22 @@ void JoypadSender_Task(void *pvParameters) {
             AutoMode_OnFrameSent();
         }
 
+        /* 视觉纠偏测试帧 (TSTA / ADJ / TSTE): 最高优先 */
+        uint8_t tbuf[32]; uint8_t tlen = 0;
+        if (TestMode_WantsSendFrame(tbuf, &tlen)) {
+            NRF_StopListening();
+            NRF_SendFrame(tbuf, tlen);
+            TestMode_OnFrameSent();
+        }
+
         /* 子机指令直通 (App 按键 / 视觉纠偏): 优先于虚拟手柄帧 */
         uint8_t child_frame[32];
         if (ChildCmd_Pop(child_frame)) {
             NRF_StopListening();
             NRF_SendFrame(child_frame, sizeof(child_frame));
         }
+
+        TestMode_Tick();
 
         NRF_StopListening();
         bool success = NRF_SendFrame(buf, sizeof(buf));

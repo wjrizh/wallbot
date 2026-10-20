@@ -51,23 +51,22 @@
 #define ALIGN_DETECT_H          240
 
 /* ---- AprilTag / 视觉纠偏几何参数 (与 code/tag_utils.py 保持一致) ---- */
-#define TAG_REAL_MM       22.0f  /* 标签黑框真实边长(mm), 打印后实测填入 (实测22mm) */
+#define TAG_REAL_MM       22.0f  /* 标签黑框真实边长(mm), 实测 22mm */
 #define R_TAG_MM          60.0f  /* 标签黑框中心平面到管道轴线的垂直距离(mm), 贴好后必须实测 */
 #define PIPE_RADIUS_MM    60.0f  /* 管道内半径(mm), 仅用于把 phi 换算成沿管壁弧长 */
 
 #define TAG_ID            0      /* 使用的标签 ID */
 
 /* ---- 检测器参数 ---- */
-#define DET_EDGE_PX_MIN   12     /* 黑框边长像素下限; 12px 支持放远约 2 倍距离 */
-#define DET_EDGE_PX_MAX   200    /* 标签黑框边长像素上限 */
+#define DET_EDGE_PX_MIN   24     /* 黑框边长像素下限 (2x放大后 640x480 坐标) */
+#define DET_EDGE_PX_MAX   400    /* 黑框边长像素上限 (2x放大后 640x480 坐标) */
 #define DET_MAX_HAMMING   1      /* 解码允许的最大汉明距离 */
-#define DET_CONTRAST_MIN  25.0f  /* 黑白电平最小对比度 (抗全黑/全白误检) */
+#define DET_CONTRAST_MIN  15.0f  /* 黑白电平最小对比度; 15 提升远处低对比 tag 检出 */
 #define DET_ADAPT_WIN     45     /* 自适应阈值窗口(奇数, 像素)。
                                   * 须大于最大标签的黑框厚度(edge_max/8*1=25px):
                                   * 窗口大->厚黑框核心也判暗(或成闭合厚环带), 不断裂 */
-#define DET_ADAPT_BIAS    25     /* 判黑偏置: gray < mean - bias 视为暗。
-                                  * 取 ~2.5x 噪声sigma: 噪声误判率<1%, 背景不絮凝;
-                                  * 黑框会变细环带(连续等值线,不断裂), 由填洞补实心 */
+#define DET_ADAPT_BIAS    18     /* 判黑偏置; 18 对小 tag 厚黑框更宽容 */
+#define DET_SMALL_WIN     15     /* 小 tag 专用窗口: 远处黑框 12~20px 时用 15 重跑一遍 */
 
 /* ---- 纠偏闭环参数 (执行文档 6.3 节: ANGLE_TOL=4°, 3 帧一致才采信) ---- */
 #define ALIGN_FRAMES        3      /* 每次测量连拍帧数 (识别要连续一致) */

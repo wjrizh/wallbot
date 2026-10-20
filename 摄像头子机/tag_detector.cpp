@@ -29,9 +29,6 @@ typedef struct {
     int64_t sx, sy, sxx, syy, sxy;
 } CompStat;
 
-/* 候选连通域: 4096 个 x 8B = 32KB, 必须放 PSRAM, 不能放栈上 */
-
-typedef struct { int id; int32_t area; } Cand;
 /* ================= 工作区 (按尺寸惰性分配复用) ================= */
 typedef struct {
     int      w, h;
@@ -41,7 +38,6 @@ typedef struct {
     uint16_t *parent;  /* 并查集 */
     CompStat *stats;   /* 暗域统计 */
     uint16_t (*wbbox)[4]; /* 白域包围盒 (填洞用) */
-    Cand     *cands;   /* 候选数组 (PSRAM) */
 } Scratch;
 
 static Scratch g_sc;
@@ -53,10 +49,45 @@ static void *psram_malloc(size_t n) {
     return p;
 }
 
+/* 2x 双线性放大缓冲 (PSRAM, 惰性分配): 320x240 -> 640x480,
+ * 让远处小 tag 的黑框在检测阶段获得双倍像素, 而不增加 JPEG 解码负担。 */
+static uint8_t *s_up = NULL;
+static int s_up_w = 0, s_up_h = 0;
+
+static const uint8_t *upscale2x(const uint8_t *src, int w, int h, int stride,
+                                int *out_w, int *out_h) {
+    const int W = w * 2, H = h * 2;
+    if (!s_up || s_up_w != W || s_up_h != H) {
+        free(s_up);
+        s_up = (uint8_t *)psram_malloc((size_t)W * H);
+        s_up_w = W; s_up_h = H;
+    }
+    if (!s_up) return NULL;
+    for (int y = 0; y < H; y++) {
+        int sy = y >> 1;
+        int sy1 = (sy + 1 < h) ? sy + 1 : sy;
+        int fy = (y & 1) ? 128 : 0;
+        const uint8_t *r0 = src + (size_t)sy * stride;
+        const uint8_t *r1 = src + (size_t)sy1 * stride;
+        uint8_t *dst = s_up + (size_t)y * W;
+        for (int x = 0; x < W; x++) {
+            int sx = x >> 1;
+            int sx1 = (sx + 1 < w) ? sx + 1 : sx;
+            int fx = (x & 1) ? 128 : 0;
+            int a = r0[sx], b = r0[sx1], c = r1[sx], d = r1[sx1];
+            int top = a * (256 - fx) + b * fx;
+            int bot = c * (256 - fx) + d * fx;
+            dst[x] = (uint8_t)((top * (256 - fy) + bot * fy) >> 16);
+        }
+    }
+    *out_w = W; *out_h = H;
+    return s_up;
+}
+
 static bool scratch_ensure(int w, int h) {
     if (g_sc.w == w && g_sc.h == h) return true;
     free(g_sc.ii); free(g_sc.bin); free(g_sc.lab); free(g_sc.parent);
-    free(g_sc.stats); free(g_sc.wbbox); free(g_sc.cands);
+    free(g_sc.stats); free(g_sc.wbbox);
     memset(&g_sc, 0, sizeof(g_sc));
     g_sc.ii     = (uint32_t *)psram_malloc((size_t)(w + 1) * (h + 1) * 4);
     g_sc.bin    = (uint8_t *)psram_malloc((size_t)w * h);
@@ -64,11 +95,10 @@ static bool scratch_ensure(int w, int h) {
     g_sc.parent = (uint16_t *)psram_malloc((size_t)w * h * 2);
     g_sc.stats  = (CompStat *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(CompStat));
     g_sc.wbbox  = (uint16_t (*)[4])psram_malloc((size_t)DET_MAX_COMPS * 4 * 2);
-    g_sc.cands  = (Cand *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(Cand));
     if (!g_sc.ii || !g_sc.bin || !g_sc.lab || !g_sc.parent ||
-        !g_sc.stats || !g_sc.wbbox || !g_sc.cands) {
+        !g_sc.stats || !g_sc.wbbox) {
         free(g_sc.ii); free(g_sc.bin); free(g_sc.lab); free(g_sc.parent);
-        free(g_sc.stats); free(g_sc.wbbox); free(g_sc.cands);
+        free(g_sc.stats); free(g_sc.wbbox);
         memset(&g_sc, 0, sizeof(g_sc));
         return false;
     }
@@ -527,7 +557,7 @@ static void refine_corners(const uint8_t *im, int w, int h, int stride,
 }
 
 /* ================= 候选 -> 角点 -> 解码 ================= */
-
+typedef struct { int id; int32_t area; } Cand;
 
 static int cand_cmp(const void *a, const void *b) {
     return ((const Cand *)b)->area - ((const Cand *)a)->area;
@@ -581,6 +611,13 @@ bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
         diag->stage = 1;
     }
     if (!gray || w <= 0 || h <= 0) return false;
+    /* 320x240 输入先 2x 放大: 远处小 tag 黑框获得双倍像素,
+     * 解码仍是 320x240 (不增加 esp_jpeg_decode 负担)。 */
+    if (w <= 400 && h <= 300) {
+        int uw = 0, uh = 0;
+        const uint8_t *up = upscale2x(gray, w, h, stride, &uw, &uh);
+        if (up) { gray = up; w = uw; h = uh; stride = uw; }
+    }
     if (!scratch_ensure(w, h)) return false;
 
     threshold_adaptive(gray, w, h, stride);
@@ -590,8 +627,11 @@ bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
     if (g_ncomps == 0) return false;
 
     /* 按面积取前几个候选 */
-    Cand *cands = g_sc.cands;
-    if (!cands) return false;
+    static Cand *cands = NULL;
+    if (!cands) {
+        cands = (Cand *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(Cand));
+        if (!cands) return false;
+    }
     int ncand = 0;
     for (int i = 1; i < DET_MAX_COMPS && i < 65535; i++) {
         if (g_sc.stats[i].area > 0) {

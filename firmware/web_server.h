@@ -9,5 +9,6 @@ void WebServer_RefreshIMU(void);
 float WebServer_GetIMURoll(void);
 float FetchIMURoll(void);
 void WebServer_SendLog(const char* msg);
+void WebServer_PushTestStatus(void);
 
 #endif

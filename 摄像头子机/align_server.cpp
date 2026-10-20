@@ -136,6 +136,8 @@ static TagObservation s_consensus_obs;
 static bool           s_consensus_ok = false;
 static char           s_consensus_reason[32] = "no_tag";
 static uint32_t       s_last_dt_ms = 0;
+static TagObservation s_last_good;      /* 最近一次单帧有效观测 (记参考位兜底用) */
+static bool           s_last_good_ok = false;
 
 /* 供 :81/stream 调用: 仅当 worker 正在等帧时才拷走一帧, 耗时 <0.2ms */
 void AlignServer_FeedFrame(const uint8_t *jpg, size_t len, int w, int h) {
@@ -306,7 +308,15 @@ static void align_worker_task(void *arg) {
             if (AlignDecodeJpegToGray(s_feed_jpg, frame_len, frame_w, frame_h, &gray, &gw, &gh)) {
                 got = TagDetector_DetectEx(gray, gw, gh, gw, &o, &d);
                 g_last_diag = d;
-                if (got) s_diag_detect_ok++; else s_diag_detect_fail++;
+                if (got) {
+                    s_diag_detect_ok++;
+                    portENTER_CRITICAL(&s_res_mux);
+                    s_last_good = o;
+                    s_last_good_ok = true;
+                    portEXIT_CRITICAL(&s_res_mux);
+                } else {
+                    s_diag_detect_fail++;
+                }
             } else {
                 s_diag_decode_fail++;
             }
@@ -326,11 +336,30 @@ static esp_err_t handle_align_get(httpd_req_t *req) {
     s_detect_active_until = millis() + 3000;   /* 续租 3s, 让 worker 继续检测 */
 
     const AlignRefPose *ref = AlignMeasure_GetRef();
+    /* 无参考位时不直接报 no_ref: 仍返回原始观测 (u/v/theta/edge),
+     * 让页面不点"记参考位"也能看到实时检测数据。 */
     if (!ref->valid) {
-        snprintf(g_last_reason, sizeof(g_last_reason), "no_ref");
+        TagObservation o;
+        bool has;
+        uint32_t dt;
+        portENTER_CRITICAL(&s_res_mux);
+        has = s_last_good_ok;
+        o = s_last_good;
+        dt = s_last_dt_ms;
+        portEXIT_CRITICAL(&s_res_mux);
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"no_ref\"}", HTTPD_RESP_USE_STRLEN);
+        if (!has) {
+            snprintf(g_last_reason, sizeof(g_last_reason), "no_tag");
+            return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"no_tag\"}", HTTPD_RESP_USE_STRLEN);
+        }
+        snprintf(g_last_reason, sizeof(g_last_reason), "no_ref");
+        int n = snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"no_ref\":true,\"dt_ms\":%u,\"id\":%d,\"hamming\":%d,"
+            "\"u\":%.1f,\"v\":%.1f,\"theta_deg\":%.2f,\"edge_px\":%.1f}",
+            (unsigned)dt, o.id, o.hamming, (double)o.u, (double)o.v,
+            (double)(o.theta * 180.0f / (float)M_PI), (double)o.edge_a);
+        return httpd_resp_send(req, buf, n);
     }
 
     TagObservation avg;
@@ -394,15 +423,26 @@ static esp_err_t handle_align_ref(httpd_req_t *req) {
     memset(&avg, 0, sizeof(avg));
     char reason[32] = "no_tag";
 
-    while ((millis() - w0) < 800) {
+    /* 记参考位是用户主动触发的一次性操作, 不该被 3 帧抖动卡死:
+     * 等 3s 拿稳定共识; 超时但已有单帧有效观测时, 直接用它记参考位。 */
+    TagObservation single;
+    bool has_single = false;
+    memset(&single, 0, sizeof(single));
+    while ((millis() - w0) < 3000) {
         portENTER_CRITICAL(&s_res_mux);
         got = s_consensus_ok;
         avg = s_consensus_obs;
         strncpy(reason, s_consensus_reason, sizeof(reason) - 1);
         reason[sizeof(reason) - 1] = '\0';
+        if (!got && s_last_good_ok) { single = s_last_good; has_single = true; }
         portEXIT_CRITICAL(&s_res_mux);
         if (got) break;
         vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    if (!got && has_single) {
+        avg = single;
+        got = true;
+        strcpy(reason, "single");
     }
 
     httpd_resp_set_type(req, "application/json");

@@ -95,6 +95,10 @@
       if (ack) { self._emit('ack', ack); return; }
       var logMsg = global.Protocol.parseLog(bytes);
       if (logMsg) { self._emit('log', '[固件] ' + logMsg); return; }
+      var telem = global.Protocol.parseTestTelem(bytes);
+      if (telem) { self._emit('testTelem', telem); return; }
+      var tstate = global.Protocol.parseTestState(bytes);
+      if (tstate) { self._emit('testState', tstate); return; }
     };
 
     ws.onclose = function (ev) {

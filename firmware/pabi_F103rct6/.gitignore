@@ -1,0 +1,11 @@
+MDK-ARM/pabi_F103rct6/
+MDK-ARM/*.uvguix.*
+MDK-ARM/startup_stm32f103xe.lst
+build/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+Core/Src/*.bak*

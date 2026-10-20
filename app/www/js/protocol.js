@@ -23,7 +23,10 @@
     COOP_SIMPLE:   0x1A,
     GRIPPER:       0x1B,
     AVOID_RUN:     0x1C,
-    COOP_ABORT:    0x1D
+    COOP_ABORT:    0x1D,
+    TEST_START:    0x30,
+    TEST_ADJ:      0x31,
+    TEST_STOP:     0x32
   };
 
   var CAN_SUB = { ENABLE: 0, DISABLE: 1, SET_ZERO: 2 };
@@ -37,6 +40,8 @@
 
   /* 固件日志帧 0x83: payload = 文本字符串 (len 字节) */
   var LOG_CMD = 0x83;
+  var TEST_TELEM_CMD = 0x86;
+  var TEST_STATE_CMD = 0x87;
 
   function crc16(bytes) {
     var crc = 0xFFFF;
@@ -122,6 +127,30 @@
     return text;
   }
 
+  /* 0x86: 子机轮子运动遥测 'J' */
+  function parseTestTelem(frame) {
+    var f = parseFrame(frame);
+    if (!f || f.cmd !== TEST_TELEM_CMD || f.payload.length < 11) return null;
+    var p = f.payload;
+    var dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    return {
+      stage: p[1],
+      dir: (p[2] & 0x80) ? (p[2] - 256) : p[2],
+      aMm: dv.getInt16(3, true),
+      bMm: dv.getInt16(5, true),
+      targetMm: dv.getInt16(7, true),
+      pct: p[9],
+      rc: p[10]
+    };
+  }
+
+  /* 0x87: 测试状态 [state][round][last_rc] */
+  function parseTestState(frame) {
+    var f = parseFrame(frame);
+    if (!f || f.cmd !== TEST_STATE_CMD || f.payload.length < 3) return null;
+    return { state: f.payload[0], round: f.payload[1], lastRc: f.payload[2] };
+  }
+
   function uint8ArrayToHex(bytes) {
     var out = [];
     for (var i = 0; i < bytes.length; i++) {
@@ -144,6 +173,10 @@
     buildFrame: buildFrame,
     parseFrame: parseFrame,
     parseState: parseState,
+    TEST_TELEM_CMD: TEST_TELEM_CMD,
+    TEST_STATE_CMD: TEST_STATE_CMD,
+    parseTestTelem: parseTestTelem,
+    parseTestState: parseTestState,
     uint8ArrayToHex: uint8ArrayToHex,
 
     canCmd: function (motorId, subCmd) {
@@ -159,6 +192,16 @@
     uTurn: function () { return buildFrame(CMD.U_TURN, null); },
     coopStart: function () { return buildFrame(CMD.COOP_START, null); },
     coopAbort: function () { return buildFrame(CMD.COOP_ABORT, null); },
+    testStart: function () { return buildFrame(CMD.TEST_START, null); },
+    testStop: function () { return buildFrame(CMD.TEST_STOP, null); },
+    testAdj: function (phi, psi, ax) {
+      var p = new Uint8Array(12);
+      var dv = new DataView(p.buffer);
+      dv.setFloat32(0, phi, true);
+      dv.setFloat32(4, psi, true);
+      dv.setFloat32(8, ax, true);
+      return buildFrame(CMD.TEST_ADJ, p);
+    },
     coopSimple: function () { return buildFrame(CMD.COOP_SIMPLE, null); },
     gripper: function (angleDeg) {
       var a = Math.round(angleDeg * 10);
