@@ -51,7 +51,7 @@
 #define ALIGN_DETECT_H          240
 
 /* ---- AprilTag / 视觉纠偏几何参数 (与 code/tag_utils.py 保持一致) ---- */
-#define TAG_REAL_MM       50.0f  /* 标签黑框真实边长(mm), 打印后实测填入 */
+#define TAG_REAL_MM       22.0f  /* 标签黑框真实边长(mm), 打印后实测填入 (实测22mm) */
 #define R_TAG_MM          60.0f  /* 标签黑框中心平面到管道轴线的垂直距离(mm), 贴好后必须实测 */
 #define PIPE_RADIUS_MM    60.0f  /* 管道内半径(mm), 仅用于把 phi 换算成沿管壁弧长 */
 
