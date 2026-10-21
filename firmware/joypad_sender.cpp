@@ -95,7 +95,13 @@ void JoypadSender_Task(void *pvParameters) {
             NRF_SendFrame(child_frame, sizeof(child_frame));
         }
 
-        TestMode_Tick();
+        /* 测试模式: 保持 RX 监听等 TSTB/DONE, 不发摇杆帧抢占 */
+        if (TestMode_IsActive()) {
+            NRF_StartListening();
+            TestMode_Tick();
+            vTaskDelayUntil(&xLastWakeTime, period);
+            continue;
+        }
 
         NRF_StopListening();
         bool success = NRF_SendFrame(buf, sizeof(buf));
@@ -105,6 +111,9 @@ void JoypadSender_Task(void *pvParameters) {
             last_key = 0;
             Joypad_ClearKey();
         }
+
+        /* 发完切回 RX, 下一轮才能收到子机应答 */
+        NRF_StartListening();
 
         vTaskDelayUntil(&xLastWakeTime, period);
     }

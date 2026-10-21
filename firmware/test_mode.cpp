@@ -110,6 +110,7 @@ bool TestMode_WantsSendFrame(uint8_t* out_buf, uint8_t* out_len) {
 }
 
 void TestMode_OnFrameSent(void) {
+    NRF_StartListening();
     if (s_state == TM_SEND_TSTA)      { s_state = TM_WAIT_TSTB; s_deadline = millis() + TSTB_TIMEOUT_MS; }
     else if (s_state == TM_SEND_ADJ)  { s_state = TM_WAIT_DONE; s_deadline = millis() + DONE_TIMEOUT_MS; }
     else if (s_state == TM_SEND_TSTE) { s_state = TM_IDLE; }
