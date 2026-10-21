@@ -72,11 +72,19 @@ void MX_GPIO_Init(void)
 
   /*Configure GPIO pins : PA4 PA5 PA6 PA7
                            PA8 PA11 PA12 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7
+  /* PA6 = NRF24L01 IRQ, 是模块输出/MCU 输入, 绝不能配成推挽输出,
+     否则 spi.c 里 while(ReadPin(PA6)!=0) 立即退出, TX 时序错乱、收包假阳性 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_7
                           |GPIO_PIN_8|GPIO_PIN_11|GPIO_PIN_12;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* PA6: IRQ 输入, 上拉 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PB12 */

@@ -13,7 +13,7 @@
 #include <string.h>
 
 #define TSTA_TIMEOUT_MS   3000
-#define TSTB_TIMEOUT_MS   5000
+#define TSTB_TIMEOUT_MS   2000   /* 实测子机 5ms 内回 TSTB, 2s 足够 */
 #define DONE_TIMEOUT_MS  60000   /* 子机执行一段纠偏最长时限 */
 #define TSTE_TIMEOUT_MS   1000
 

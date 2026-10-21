@@ -83,8 +83,8 @@ void JoypadSender_Task(void *pvParameters) {
         /* 视觉纠偏测试帧 (TSTA / ADJ / TSTE): 最高优先 */
         uint8_t tbuf[32]; uint8_t tlen = 0;
         if (TestMode_WantsSendFrame(tbuf, &tlen)) {
-            NRF_StopListening();
-            NRF_SendFrame(tbuf, tlen);
+            /* 带重试: 子机回 TSTB/发遥测时会短暂切 TX, 单发易收不到 ACK */
+            NRF_SendFrameRetry(tbuf, tlen, 4);
             TestMode_OnFrameSent();
         }
 

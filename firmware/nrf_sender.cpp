@@ -22,7 +22,8 @@ void NRF_Sender_Init(void) {
     radio.setAutoAck(true);
     radio.setRetries(0, 3);
     radio.setPayloadSize(32);
-    radio.openReadingPipe(1, tx_addr);
+    /* 子机 EN_RXADDR 只开 pipe0, 母机必须用 pipe0 收, 否则收不到回包 */
+    radio.openReadingPipe(0, tx_addr);
     radio.openWritingPipe(tx_addr);
     radio.stopListening();
     s_listening = false;
@@ -36,6 +37,23 @@ bool NRF_SendFrame(const uint8_t* data, uint8_t len) {
     memset(buf, 0, sizeof(buf));
     memcpy(buf, data, n);
     return radio.write(buf, 32);
+}
+
+/* 带重试的发送: 每次都走完整的 stopListening->write->startListening,
+   失败间隔 25ms 让子机从 TX 切回 RX 再发. 用于测试帧(TSTA/ADJ/TSTE). */
+bool NRF_SendFrameRetry(const uint8_t* data, uint8_t len, uint8_t retries) {
+    uint8_t buf[32];
+    uint8_t n = (len > 32) ? 32 : len;
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, data, n);
+    for (uint8_t i = 0; i < retries; i++) {
+        NRF_StopListening();
+        bool ok = radio.write(buf, 32);
+        NRF_StartListening();
+        if (ok) return true;
+        delay(25);
+    }
+    return false;
 }
 
 void NRF_StartListening(void) {
