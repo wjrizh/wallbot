@@ -6,6 +6,8 @@
 #include <WebServer.h>
 #include <SPI.h>
 #include <RF24.h>
+#include <stdarg.h>
+#include <string.h>
 
 #define CE_PIN   47
 #define CSN_PIN  18
@@ -35,6 +37,14 @@ static bool     s_radioOk = false;
 static char     s_lastTx[33] = {0};
 static char     s_lastRx[33] = {0};
 static char     s_initInfo[220] = {0};   /* NRF 初始化详情, 页面启动时展示 */
+static uint8_t  s_alignState = 0;        /* 0=IDLE 1=WAIT_TSTB 2=READY 3=WAIT_DONE */
+static uint32_t s_alignMs = 0;
+static uint32_t s_alignFrames = 0;
+static uint32_t s_alignDeadline = 0;
+static uint8_t  s_alignDone = 0;
+static char     s_alignMsg[48] = {0};
+static char     s_telemLast[80] = {0};
+static float    s_adjPhi = 0, s_adjPsi = 0, s_adjAx = 0;
 
 static bool radioSetup() {
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, -1);
@@ -130,6 +140,129 @@ static void doPing() {
   }
 }
 
+/* ===== 视觉纠偏测试 (虚拟数据, 不驱动真电机) ===== */
+
+/* 全过程 trace, 网页显示 */
+static char s_trace[1400] = {0};
+static void trace(const char* fmt, ...) {
+  char line[96];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line, sizeof(line), fmt, ap);
+  va_end(ap);
+  size_t cur = strlen(s_trace);
+  snprintf(s_trace + cur, sizeof(s_trace) - cur, "[%lu] %s\n",
+           (unsigned long)millis(), line);
+}
+
+static bool sendRaw(const uint8_t* buf) {
+  /* 子机回 TSTB / 发遥测时会短暂离开 RX 切到 TX, 单次 write() 撞上该窗口
+   * 就收不到 ACK 返回 false. 重试多次, 每次失败清 FIFO+标志, 间隔 25ms
+   * 让子机回到 RX 再发. */
+  for (int attempt = 0; attempt < 6; attempt++) {
+    radio.stopListening();
+    radio.flush_tx();
+    radio.clearStatusFlags();
+    delay(2);
+    uint32_t t0 = millis();
+    bool ok = radio.write(buf, 32);
+    uint32_t dt = millis() - t0;
+    radio.flush_rx();
+    radio.startListening();
+    trace("TX att%d ok=%d %lums st=%02X",
+          attempt, ok ? 1 : 0, (unsigned long)dt, radio.getStatusFlags());
+    if (ok) return true;
+    delay(25);
+  }
+  return false;
+}
+
+static void alignStart(void) {
+  uint8_t tx[32];
+  memset(tx, 0, 32);
+  memcpy(tx, "TSTA", 4);
+  s_alignDone = 0;
+  s_alignFrames = 0;
+  s_telemLast[0] = 0;
+  s_trace[0] = 0;
+  trace("== START TSTA ==");
+  if (!sendRaw(tx)) { s_alignState = 0; snprintf(s_alignMsg, sizeof(s_alignMsg), "TSTA 发送失败"); trace("TSTA FAIL"); return; }
+  s_alignState = 1;
+  s_alignDeadline = millis() + 3000;
+  snprintf(s_alignMsg, sizeof(s_alignMsg), "等待 TSTB");
+}
+
+static void alignSendAdj(float phi, float psi, float ax) {
+  uint8_t tx[32];
+  memset(tx, 0, 32);
+  snprintf((char*)tx, 32, "ADJ,%.2f,%.2f,%.2f", phi, psi, ax);
+  s_adjPhi = phi; s_adjPsi = psi; s_adjAx = ax;
+  s_alignFrames = 0;
+  s_alignDone = 0;
+  s_telemLast[0] = 0;
+  s_alignMs = millis();
+  trace("== ADJ %s ==", (char*)tx);
+  if (!sendRaw(tx)) { s_alignState = 2; snprintf(s_alignMsg, sizeof(s_alignMsg), "ADJ 发送失败"); trace("ADJ FAIL"); return; }
+  s_alignState = 3;
+  s_alignDeadline = millis() + 8000;
+  snprintf(s_alignMsg, sizeof(s_alignMsg), "执行中");
+  trace("ADJ sent, wait DONE");
+}
+
+static void alignStop(void) {
+  uint8_t tx[32];
+  memset(tx, 0, 32);
+  memcpy(tx, "TSTE", 4);
+  trace("== STOP TSTE ==");
+  sendRaw(tx);
+  s_alignState = 0;
+  snprintf(s_alignMsg, sizeof(s_alignMsg), "已退出测试");
+  trace("state=IDLE");
+}
+
+/* 每 loop 调用: 推进状态机, 收 TSTB/遥测/DONE */
+static void alignTick(void) {
+  if (s_alignState == 0) return;
+
+  uint8_t rx[32];
+  while (radio.available()) {
+    uint8_t n = radio.getPayloadSize();
+    if (n == 0 || n > 32) n = 32;
+    memset(rx, 0, 32);
+    radio.read(rx, n);
+
+    trace("RX %c%c%c%c len", rx[0], rx[1]?rx[1]:'.', rx[2]?rx[2]:'.', rx[3]?rx[3]:'.');
+    if (memcmp(rx, "TSTB", 4) == 0) {
+      s_alignState = 2;
+      snprintf(s_alignMsg, sizeof(s_alignMsg), "就绪, 可发偏差");
+    } else if (memcmp(rx, "DONE", 4) == 0) {
+      s_alignDone = 1;
+      s_alignState = 2;
+      snprintf(s_alignMsg, sizeof(s_alignMsg), "完成 %lums %lu帧",
+               (unsigned long)(millis() - s_alignMs), (unsigned long)s_alignFrames);
+    } else if (rx[0] == 'J') {
+      int16_t a_mm, b_mm, target;
+      int8_t dir;
+      memcpy(&a_mm, &rx[3], 2);
+      memcpy(&b_mm, &rx[5], 2);
+      memcpy(&target, &rx[7], 2);
+      dir = (int8_t)rx[2];
+      s_alignFrames++;
+      snprintf(s_telemLast, sizeof(s_telemLast),
+               "stage=%u dir=%d a=%d b=%d tgt=%d pct=%u rc=%u",
+               rx[1], dir, a_mm, b_mm, target, rx[9], rx[10]);
+    }
+  }
+
+  if ((s_alignState == 1 || s_alignState == 3) &&
+      (int32_t)(millis() - s_alignDeadline) > 0) {
+    snprintf(s_alignMsg, sizeof(s_alignMsg),
+             s_alignState == 1 ? "超时: 无 TSTB" : "超时: 无 DONE");
+    trace(s_alignState == 1 ? "TIMEOUT no TSTB" : "TIMEOUT no DONE");
+    s_alignState = 0;
+  }
+}
+
 static const char PAGE[] PROGMEM = R"HTML(
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -166,6 +299,23 @@ button:active{background:#0060df}
 
 <button id="btn">发送一次 PING</button>
 <button id="btn10" style="background:#30d158">连发 10 次</button>
+
+<h2 style="margin-top:18px">视觉纠偏测试 (虚拟数据)</h2>
+<div class="card">
+  <div class="row"><span class="k">状态</span><span class="v" id="aSt">IDLE</span></div>
+  <div class="row"><span class="k">已收遥测帧</span><span class="v" id="aFn">0</span></div>
+  <div class="k" style="margin-top:6px">最近遥测</div><div class="mono" id="aTm">--</div>
+  <div class="k" style="margin-top:8px">全过程 trace</div>
+  <div id="aTr" style="max-height:200px;overflow-y:auto;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:#9a9a9f;white-space:pre-wrap;background:#000;padding:6px;border-radius:6px">--</div>
+</div>
+<div class="card">
+  <div class="row"><span class="k">phi (环向)</span><input id="phi" type="number" step="0.1" value="5" style="width:100px;background:#2c2c2e;color:#fff;border:0;border-radius:6px;padding:6px;text-align:right"></div>
+  <div class="row"><span class="k">psi (偏航)</span><input id="psi" type="number" step="0.1" value="3" style="width:100px;background:#2c2c2e;color:#fff;border:0;border-radius:6px;padding:6px;text-align:right"></div>
+  <div class="row"><span class="k">ax (径向)</span><input id="ax" type="number" step="0.1" value="0" style="width:100px;background:#2c2c2e;color:#fff;border:0;border-radius:6px;padding:6px;text-align:right"></div>
+</div>
+<button id="aStart">① 开始测试 (TSTA)</button>
+<button id="aAdj" style="background:#ff9f0a">② 发偏差 (ADJ)</button>
+<button id="aStop" style="background:#ff453a">③ 结束 (TSTE)</button>
 
 <div class="card" style="margin-top:12px">
   <div class="k" style="margin-bottom:6px">日志</div>
@@ -223,8 +373,45 @@ document.getElementById('btn10').onclick = function(){
   (function next(){ if (n++ >= 10) return; ping(); setTimeout(next, 400); })();
 };
 
+var aStateName = ['IDLE','等待TSTB','就绪','执行中'];
+function aRefresh(){
+  fetch('/align/stat').then(function(r){return r.json();}).then(function(d){
+    var el = document.getElementById('aSt');
+    el.textContent = d.msg || aStateName[d.st] || 'IDLE';
+    el.style.color = d.st===3 ? '#ff9f0a' : (d.st===2 ? '#30d158' : '#eee');
+    document.getElementById('aFn').textContent = d.frames;
+    document.getElementById('aTm').textContent = d.telem || '--';
+    var tr = document.getElementById('aTr');
+    if (d.trace) { tr.textContent = d.trace; tr.scrollTop = tr.scrollHeight; }
+  }).catch(function(){});
+}
+function aPost(url, body, okMsg){
+  fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: body||'{}'})
+    .then(function(r){return r.json();}).then(function(d){
+      log(okMsg + (d.ok ? ' ✓' : ' ✗ ' + (d.msg||'')));
+      aRefresh();
+    }).catch(function(e){ log('请求失败 ' + e); });
+}
+document.getElementById('aStart').onclick = function(){
+  log('--- 开始测试 TSTA ---'); aPost('/align/start', '{}', 'TSTA');
+};
+document.getElementById('aAdj').onclick = function(){
+  var phi = parseFloat(document.getElementById('phi').value)||0;
+  var psi = parseFloat(document.getElementById('psi').value)||0;
+  var ax  = parseFloat(document.getElementById('ax').value)||0;
+  log('--- 发偏差 ADJ,' + phi + ',' + psi + ',' + ax + ' ---');
+  fetch('/align/adj?phi='+phi+'&psi='+psi+'&ax='+ax, {method:'POST'})
+    .then(function(r){return r.json();}).then(function(d){ log('ADJ ' + (d.ok?'✓':'✗ '+(d.msg||''))); aRefresh(); })
+    .catch(function(e){ log('请求失败 ' + e); });
+};
+document.getElementById('aStop').onclick = function(){
+  log('--- 结束 TSTE ---'); aPost('/align/stop', '{}', 'TSTE');
+};
+
 refresh();
 setInterval(refresh, 1000);
+aRefresh();
+setInterval(aRefresh, 300);
 log('页面就绪, 正在获取母机状态...');
 </script></body></html>
 )HTML";
@@ -262,6 +449,55 @@ static void handlePing() {
   server.send(200, "application/json", buf);
 }
 
+static String jsonEscape(const char* s) {
+  String o;
+  o.reserve(strlen(s) + 64);
+  for (const char* p = s; *p; p++) {
+    char c = *p;
+    if (c == '"') o += "\\\"";
+    else if (c == '\\') o += "\\\\";
+    else if (c == '\n') o += "\\n";
+    else if (c == '\r') o += "\\r";
+    else if (c == '\t') o += "\\t";
+    else if ((unsigned char)c < 0x20) { char t[8]; snprintf(t, sizeof(t), "\\u%04X", c); o += t; }
+    else o += c;
+  }
+  return o;
+}
+
+static void handleAlignStat() {
+  noCache();
+  String buf = "{\"st\":" + String(s_alignState) +
+               ",\"msg\":\"" + jsonEscape(s_alignMsg) +
+               "\",\"frames\":" + String(s_alignFrames) +
+               ",\"telem\":\"" + jsonEscape(s_telemLast) +
+               "\",\"trace\":\"" + jsonEscape(s_trace) + "\"}";
+  server.send(200, "application/json", buf);
+}
+
+static void handleAlignStart() {
+  noCache();
+  alignStart();
+  server.send(200, "application/json",
+    s_alignState == 1 ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"send fail\"}");
+}
+
+static void handleAlignAdj() {
+  noCache();
+  float phi = server.hasArg("phi") ? server.arg("phi").toFloat() : 0;
+  float psi = server.hasArg("psi") ? server.arg("psi").toFloat() : 0;
+  float ax  = server.hasArg("ax")  ? server.arg("ax").toFloat()  : 0;
+  alignSendAdj(phi, psi, ax);
+  server.send(200, "application/json",
+    s_alignState == 3 ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"send fail\"}");
+}
+
+static void handleAlignStop() {
+  noCache();
+  alignStop();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   /* USB CDC 无主机读时写不阻塞(否则卡~2s) */
@@ -293,10 +529,15 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/stat", handleStat);
   server.on("/ping", handlePing);
+  server.on("/align/stat", handleAlignStat);
+  server.on("/align/start", HTTP_POST, handleAlignStart);
+  server.on("/align/adj", HTTP_POST, handleAlignAdj);
+  server.on("/align/stop", HTTP_POST, handleAlignStop);
   server.begin();
   Serial.println("[HTTP] started");
 }
 
 void loop() {
   server.handleClient();
+  alignTick();
 }
