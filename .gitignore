@@ -40,7 +40,9 @@ imu_web_test/
 imu_wireless/
 laser_multitest/
 tof_test/
+# 忽略临时/备份 main.c, 但子机工程主源文件必须入库
 main.c
+!firmware/pabi_F103rct6/Core/Src/main.c
 rs02_csp_quintic.ino
 *.tel
 ACK闭环测试表.md
