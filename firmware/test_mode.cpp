@@ -81,7 +81,7 @@ void TestMode_Start(void) {
 
 void TestMode_SendAdj(float phi_deg, float psi_deg, float ax_mm) {
     if (s_state != TM_READY) {
-        Serial.printf("[TEST] SendAdj rejected, state=%u\n", s_state);
+        Serial.printf("[TEST] SendAdj rejected, state=%u (need 3=READY)\n", s_state);
         return;
     }
     char buf[32];
@@ -124,6 +124,14 @@ void TestMode_Tick(void) {
     while (NRF_ReceiveFrame(buf, sizeof(buf), &len)) {
         if (len >= 11 && buf[0] == 'J') {
             if (s_telem_sink) s_telem_sink(buf, len);
+            continue;
+        }
+        /* 子机无线日志 'L': [0]='L' [1]=n [2..] 文本. 子机 printf 无 _write, 只能走这条 */
+        if (len >= 2 && buf[0] == 'L' && buf[1] <= 30) {
+            char msg[32];
+            memcpy(msg, &buf[2], buf[1]);
+            msg[buf[1]] = '\0';
+            Serial.printf("[CHILD] %s\n", msg);
             continue;
         }
         if (len >= 4 && memcmp(buf, "TSTB", 4) == 0 && s_state == TM_WAIT_TSTB) {

@@ -18,6 +18,14 @@
   var RC_TEXT = { 0: "进行中", 1: "到位", 2: "中止", 3: "超时/打滑" };
   var STATE_TEXT = { 0: "空闲", 1: "发 TSTA", 2: "等 TSTB", 3: "就绪", 4: "发 ADJ", 5: "执行中", 6: "发 TSTE" };
 
+  /* 迭代纠偏: 必须与固件 main.c 的常数一致, 否则扣减的剩余量算错 */
+  var ADJ_PIPE_R_MM = 300.0;   /* ADJ_PIPE_R_MM */
+  var ADJ_TRACK_MM  = 100.0;   /* ADJ_TRACK_MM  */
+  var ADJ_TOL_PHI   = 0.5;     /* ADJ_TOL_PHI   */
+  var ADJ_TOL_PSI   = 0.5;     /* ADJ_TOL_PSI   */
+  var ADJ_TOL_AX    = 2.0;     /* ADJ_TOL_AX    */
+  var ADJ_MAX_ITER  = 6;
+
   var PRESETS = [
     { label: "小", phi: 2, psi: 2, ax: 5 },
     { label: "中", phi: 5, psi: 5, ax: 10 },
@@ -44,6 +52,9 @@
     /* 遥测 */
     this._telem = { stage: 0, dir: 0, aMm: 0, bMm: 0, targetMm: 0, pct: 0, rc: 0 };
     this._testState = { state: 0, round: 0, lastRc: 0 };
+
+    /* 迭代纠偏: on=开关, active=进行中, phi/psi/ax=当前剩余偏差, n=已完成轮次 */
+    this._iter = { on: false, active: false, phi: 0, psi: 0, ax: 0, n: 0 };
   }
 
   /* ==================== 挂载 ==================== */
@@ -125,9 +136,9 @@
     body.appendChild(this._el("div", "debug-section-title", "② 输入假图像数据"));
     var form = this._el("div", "at-form");
     [
-      { key: "phi", label: "φ 周向", unit: "°", def: 5 },
-      { key: "psi", label: "ψ 航向", unit: "°", def: 5 },
-      { key: "ax", label: "ax 轴向", unit: "mm", def: 10 }
+      { key: "phi", label: "φ 周向", unit: "°", def: 0 },
+      { key: "psi", label: "ψ 航向", unit: "°", def: 0 },
+      { key: "ax", label: "ax 轴向", unit: "mm", def: 0 }
     ].forEach(function (f) {
       var row = self._el("div", "at-form-row");
       row.appendChild(self._el("span", "at-form-k", f.label));
@@ -161,6 +172,16 @@
     btnSend.style.marginTop = "8px";
     btnSend.addEventListener("click", function () { self._sendAdj(); });
     body.appendChild(btnSend);
+
+    var btnIter = this._el("button", "btn btn-gray btn-wide", "迭代纠偏: 关");
+    btnIter.style.marginTop = "6px";
+    btnIter.addEventListener("click", function () {
+      self._iter.on = !self._iter.on;
+      if (!self._iter.on) self._iter.active = false;
+      btnIter.textContent = "迭代纠偏: " + (self._iter.on ? "开" : "关");
+      self._log("迭代纠偏已" + (self._iter.on ? "开启" : "关闭"));
+    });
+    body.appendChild(btnIter);
 
     /* ---- ③ 差速轮示意 ---- */
     body.appendChild(this._el("div", "debug-section-title", "③ 子机差速轮动作"));
@@ -249,15 +270,79 @@
   };
 
   AlignModule.prototype._stop = function () {
+    this._iter.active = false;
     this._send(global.Protocol.testStop(), "TEST_STOP");
+  };
+
+  /* 发一轮 ADJ. 迭代模式下由 _nextIter 续发, 手动模式只发这一次 */
+  AlignModule.prototype._sendRound = function (phi, psi, ax) {
+    var desc = "ADJ phi=" + phi.toFixed(1) + " psi=" + psi.toFixed(1) + " ax=" + ax.toFixed(1);
+    if (!this._send(global.Protocol.testAdj(phi, psi, ax), desc)) return false;
+    this._rows.push({ phi: phi, psi: psi, ax: ax, rc: -1 });
+    this._renderStages();
+    return true;
   };
 
   AlignModule.prototype._sendAdj = function () {
     var phi = this._num("phi"), psi = this._num("psi"), ax = this._num("ax");
-    var desc = "ADJ phi=" + phi + " psi=" + psi + " ax=" + ax;
-    if (!this._send(global.Protocol.testAdj(phi, psi, ax), desc)) return;
-    this._rows.push({ phi: phi, psi: psi, ax: ax, rc: -1 });
-    this._renderStages();
+    if (this._iter.on) {
+      this._iter.phi = phi; this._iter.psi = psi; this._iter.ax = ax;
+      this._iter.n = 0; this._iter.active = true;
+      this._log("迭代纠偏开始: φ=" + phi + " ψ=" + psi + " ax=" + ax);
+    }
+    this._sendRound(phi, psi, ax);
+  };
+
+  /* 阶段完成(rc=1)时, 用实测里程扣减该阶段对应的剩余偏差 */
+  AlignModule.prototype._applyStageResult = function (t) {
+    var it = this._iter;
+    var done = Math.min(Math.abs(t.aMm), Math.abs(t.bMm));   /* 与固件 min 判据一致 */
+    var cmdMm = Math.abs(t.targetMm);
+    var resid = cmdMm - done;
+    if (resid < 0) resid = 0;
+    if (t.stage === 3) {
+      var deg = resid / (Math.PI / 180 * ADJ_PIPE_R_MM);
+      it.phi = (it.phi < 0 ? -1 : 1) * deg;
+      if (deg < ADJ_TOL_PHI) it.phi = 0;
+      this._log("φ 剩余: 目标" + cmdMm + "mm 实走" + done + "mm -> " + deg.toFixed(2) + "°");
+    } else if (t.stage === 2) {
+      var th = resid / (Math.PI / 180 * (ADJ_TRACK_MM * 0.5));
+      it.psi = (it.psi < 0 ? -1 : 1) * th;
+      if (th < ADJ_TOL_PSI) it.psi = 0;
+      this._log("ψ 剩余: 目标" + cmdMm + "mm 实走" + done + "mm -> " + th.toFixed(2) + "°");
+    }
+  };
+
+  /* 一轮结束: 判断是否继续下一轮 */
+  AlignModule.prototype._nextIter = function () {
+    var it = this._iter;
+    it.n++;
+    if (it.n >= ADJ_MAX_ITER) {
+      it.active = false;
+      this._log("迭代纠偏: 达最大轮次 " + ADJ_MAX_ITER + ", 停止", true);
+      this._syncInputs();
+      return;
+    }
+    if (Math.abs(it.phi) < ADJ_TOL_PHI) it.phi = 0;
+    if (Math.abs(it.psi) < ADJ_TOL_PSI) it.psi = 0;
+    if (Math.abs(it.ax)  < ADJ_TOL_AX)  it.ax  = 0;
+    if (it.phi === 0 && it.psi === 0 && it.ax === 0) {
+      it.active = false;
+      this._log("迭代纠偏: 已进入容差, 共 " + it.n + " 轮");
+      this._syncInputs();
+      return;
+    }
+    this._log("迭代第 " + (it.n + 1) + " 轮: φ=" + it.phi.toFixed(2) +
+              " ψ=" + it.psi.toFixed(2) + " ax=" + it.ax.toFixed(2));
+    this._syncInputs();
+    this._sendRound(it.phi, it.psi, it.ax);
+  };
+
+  AlignModule.prototype._syncInputs = function () {
+    if (this._inputs.phi) this._inputs.phi.value = this._iter.phi.toFixed(1);
+    if (this._inputs.psi) this._inputs.psi.value = this._iter.psi.toFixed(1);
+    if (this._inputs.ax)  this._inputs.ax.value  = this._iter.ax.toFixed(1);
+    this._syncTarget();
   };
 
   AlignModule.prototype._onTestState = function (s) {
@@ -270,6 +355,8 @@
     if (s.round !== prev) {
       this._log("第 " + s.round + " 轮完成");
       this._renderStages();
+      if (this._iter.active && s.lastRc === 0) this._nextIter();
+      else if (this._iter.active) { this._iter.active = false; this._syncInputs(); }
     }
     if (s.lastRc === 3) this._log("测试超时", true);
   };
@@ -281,6 +368,8 @@
       if (last >= 0) this._rows[last].rc = t.rc;
       this._renderStages();
     }
+    /* 阶段到位(rc=1)才扣减; 中止/超时不改剩余量 */
+    if (this._iter.active && t.rc === 1) this._applyStageResult(t);
   };
 
   AlignModule.prototype._renderStages = function () {

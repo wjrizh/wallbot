@@ -31,6 +31,7 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdlib.h>             /* atoi: 树莓派PWM设定指令 */
+#include <stdio.h>              /* snprintf: 组无线日志帧 */
 //GIS? 552g 60% 7.6V ok ??500g?472g ????80? ?? ?
 /* USER CODE END Includes */
 
@@ -632,6 +633,17 @@ static void Coop_SendFrame(const char *frame){
   else                               printf("%s send fail\r\n", frame);
 }
 
+/* 子机日志帧 'L': [0]='L' [1]=长度 [2..] 文本. 子机 printf 无 _write 重定向,
+ * 日志只能经 NRF 送回母机, 由母机打印到串口. 仅在段边界调用, 不进 10ms 控制循环 */
+static void Adj_Log(const char *msg){
+  uint8_t f[32];
+  size_t n = strlen(msg);
+  if(n > 30) n = 30;
+  f[0] = 'L';
+  f[1] = (uint8_t)n;
+  memcpy(&f[2], msg, n);
+  (void)Coop_SendRaw(f, (uint8_t)(n + 2), 2);
+}
 /* 轮子运动遥测帧 'J' (11 字节), 母机原样转发 App */
 static void Test_Telem(uint8_t stage, int8_t dir, int16_t a_mm, int16_t b_mm,
                        int16_t target_mm, uint8_t pct, uint8_t rc){
@@ -947,8 +959,10 @@ uint32_t Flash_ReadNUM[2] = {0};
  * 每个子动作: 轮速PID慢速 + 编码器里程计计数到量即停 + 超时 + 每10ms轮询中止
  * 返回: 0=完成 1=被中止(STOP/遥控) 2=超时/打滑 */
 #define ADJ_PI              3.14159265f
-#define ADJ_SPEED_REV       12.0f    /* 纠偏行驶速度(电机轴转/s), 轮面 12*15=180mm/s.
+#define ADJ_SPEED_REV       12.0f    /* 纠偏直行速度(电机轴转/s), 轮面 12*15=180mm/s.
                                      原 80 时轮面 1200mm/s, 几十mm 的目标 40ms 就跑完, 肉眼只见抖一下 */
+#define ADJ_SPIN_SPEED_REV  40.0f    /* 自旋专用速度: arc 通常只有 20mm 量级, 用 12 时占空比仅 5%,
+                                     PID 积分来不及建立, 实测 B 轮 2s 内只走 -2mm */
 #define ADJ_MM_PER_MOTORREV 15.0f    /* ⚠️占位待标定: 里程计每"电机转"对应轮面行走毫米
                                      标定: 跑一段已知指令, 卷尺量实际距离, 按比例修此值 */
 #define ADJ_TRACK_MM        100.0f   /* ⚠️占位待标定: 两驱动轮接触点间距(mm) */
@@ -964,9 +978,9 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_MAX_PSI         10.0f
 #define ADJ_MAX_AX          30.0f    /* 单次限幅(mm) */
 #define ADJ_SETTLE_MS       150      /* 段间刹车稳定等待 */
-#define ADJ_DEMO_GAIN       5.0f     /* 调试放大: 假偏差仅几度, 算出的位移只有 10mm 量级, 肉眼难辨.
-                                        放大 phi/psi 后动作明显 (ax 已能走 60mm 斜行, 不放大).
-                                        实机标定后必须设回 1.0 */
+#define ADJ_DEMO_GAIN       1.0f     /* 放大倍数. 迭代纠偏要求面板能按实测里程扣减剩余偏差,
+                                        放大 5 倍会让面板的账对不上(一轮冲过头来回震荡),
+                                        故固定 1.0: 输入多少度就执行多少度 */
 #define ADJ_SLIP_DIFF_MM    50.0f    /* 直行两轮里程差判打滑. 暂放宽: 里程换算常数未标定会误判 */
 #define ADJ_SELF_TEST       1        /* 1=作业模式下 key8 触发一次演示纠偏 */
 #define ADJ_ST_AXIAL        1
@@ -1023,24 +1037,33 @@ static uint8_t Adj_Move(float dist_mm){
     uint32_t t_tel = 0;
     int8_t   dir = (dist_mm > 0) ? 1 : -1;
     while(1){
-      /* 直行: A/B 同向. 原为 PID_MB(-v) 反向, 实测走成原地转(A=-23 B=94) */
+      /* 直行: A/B 必须同号同速. v 的符号由 dist_mm 定 */
       if(dist_mm > 0){ PID_MA(+v); PID_MB(+v); }
       else           { PID_MA(-v); PID_MB(-v); }
       HAL_Delay(10);
       Adj_OdomUpdate(&od);
       {
-        float done = (fabsf(od.a_mm) + fabsf(od.b_mm)) * 0.5f;
+        /* 直行同样用 min: 两轮都走够 target 才算完成, 避免单轮转满就退出 */
+        float da = fabsf(od.a_mm), db = fabsf(od.b_mm);
+        float done = (da < db) ? da : db;
         if(HAL_GetTick() - t_tel >= ADJ_TEL_PERIOD_MS){
           uint8_t pct = (target > 0.01f) ? (uint8_t)(done * 100.0f / target) : 0;
           if(pct > 100) pct = 100;
           t_tel = HAL_GetTick();
+          {
+            char lb[40];
+            snprintf(lb, sizeof(lb), "mv d=%d A=%d B=%d p=%d",
+                     (int)dist_mm, (int)od.a_mm, (int)od.b_mm, (int)pct);
+            Adj_Log(lb);
+          }
           Test_Telem(ADJ_ST_MOVE, dir, (int16_t)od.a_mm, (int16_t)od.b_mm,
                      (int16_t)target, pct, 0);
         }
         if(done >= target) break;
       }
-      /* 打滑判据: 两轮里程差超目标 60% 且已走够 5mm 才判, 避免常数未标定时误判 */
-      float done_out = (fabsf(od.a_mm) + fabsf(od.b_mm)) * 0.5f;
+      /* 打滑判据: 用 min 判已走够, 两轮里程差超阈值才判打滑.
+         原用平均, 单轮不动时平均值仍有 A/2, 掩盖了 B 卡死 */
+      float done_out = (fabsf(od.a_mm) < fabsf(od.b_mm)) ? fabsf(od.a_mm) : fabsf(od.b_mm);
       if(done_out > 5.0f && fabsf(fabsf(od.a_mm) - fabsf(od.b_mm)) > (target * 0.6f + ADJ_SLIP_DIFF_MM)){
         motor_STOP();
         Test_Telem(ADJ_ST_MOVE, dir, (int16_t)od.a_mm, (int16_t)od.b_mm, (int16_t)target, 100, 3);
@@ -1060,15 +1083,19 @@ static uint8_t Adj_Move(float dist_mm){
     Test_Telem(ADJ_ST_MOVE, dir, (int16_t)od.a_mm, (int16_t)od.b_mm, (int16_t)target, 100, 1);
   }
   motor_STOP();
-  printf("ADJ move %dmm ok (A=%d B=%d)\r\n", (int)target, (int)od.a_mm, (int)od.b_mm);
+  {
+    char lb[32];
+    snprintf(lb, sizeof(lb), "move d=%d ok A=%d B=%d", (int)dist_mm, (int)od.a_mm, (int)od.b_mm);
+    Adj_Log(lb);
+  }
   return 0;
 }
 /* 原地旋转 theta_deg: >0=S+方向(A上升/B下降), <0=S-; 返回同上 */
 static uint8_t Adj_Spin(float theta_deg){
   ADJ_ODOM_T od;
   float arc = fabsf(theta_deg) * ADJ_PI / 180.0f * (ADJ_TRACK_MM * 0.5f);
-  float v = ADJ_SPEED_REV;
-  uint32_t t_to = (uint32_t)(arc / (ADJ_SPEED_REV * ADJ_MM_PER_MOTORREV) * 20000.0f) + 20000u;
+  float v = ADJ_SPIN_SPEED_REV;
+  uint32_t t_to = (uint32_t)(arc / (ADJ_SPIN_SPEED_REV * ADJ_MM_PER_MOTORREV) * 20000.0f) + 20000u;
   uint32_t t0 = HAL_GetTick();
   if(arc < 0.5f) return 0;
   Adj_OdomStart(&od);
@@ -1077,16 +1104,25 @@ static uint8_t Adj_Spin(float theta_deg){
     int8_t   dir = (theta_deg * (float)ADJ_SPIN_SIGN > 0) ? 1 : -1;
     while(1){
       /* 原地转: A/B 反向 (与 Move 相反) */
-      if(theta_deg * (float)ADJ_SPIN_SIGN > 0){ PID_MA(+v); PID_MB(-v); }  /* S+: A下降 B下降侧反向 */
-      else                                     { PID_MA(-v); PID_MB(+v); } /* S-: 反向 */
+      if(theta_deg * (float)ADJ_SPIN_SIGN > 0){ PID_MA(+v); PID_MB(-v); }
+      else                                     { PID_MA(-v); PID_MB(+v); }
       HAL_Delay(10);
       Adj_OdomUpdate(&od);
       {
-        float done = (fabsf(od.a_mm) + fabsf(od.b_mm)) * 0.5f;
+        /* 原地转要求两轮各走 arc: 用 min 而不是平均. 平均会被单轮拉高提前退出
+           (实测 A=44 B=0 就判完成, B 轮根本没启动) */
+        float da = fabsf(od.a_mm), db = fabsf(od.b_mm);
+        float done = (da < db) ? da : db;
         if(HAL_GetTick() - t_tel >= ADJ_TEL_PERIOD_MS){
           uint8_t pct = (arc > 0.01f) ? (uint8_t)(done * 100.0f / arc) : 0;
           if(pct > 100) pct = 100;
           t_tel = HAL_GetTick();
+          {
+            char lb[40];
+            snprintf(lb, sizeof(lb), "sp t=%d arc=%d A=%d B=%d p=%d",
+                     (int)theta_deg, (int)arc, (int)od.a_mm, (int)od.b_mm, (int)pct);
+            Adj_Log(lb);
+          }
           Test_Telem(ADJ_ST_SPIN, dir, (int16_t)od.a_mm, (int16_t)od.b_mm,
                      (int16_t)arc, pct, 0);
         }
@@ -1106,7 +1142,12 @@ static uint8_t Adj_Spin(float theta_deg){
     Test_Telem(ADJ_ST_SPIN, dir, (int16_t)od.a_mm, (int16_t)od.b_mm, (int16_t)arc, 100, 1);
   }
   motor_STOP();
-  printf("ADJ spin %ddeg ok (A=%d B=%d arc=%d)\r\n", (int)theta_deg, (int)od.a_mm, (int)od.b_mm, (int)arc);
+  {
+    char lb[40];
+    snprintf(lb, sizeof(lb), "spin t=%d ok arc=%d A=%d B=%d",
+             (int)theta_deg, (int)arc, (int)od.a_mm, (int)od.b_mm);
+    Adj_Log(lb);
+  }
   return 0;
 }
 /* 轴向斜行修正: 转+β斜下去(进L) → 转−β摆正 → 退回(直行d)
@@ -1117,7 +1158,11 @@ static uint8_t Adj_Axial(float ax_mm){
   float d = fabsf(ax_mm) / tanf(beta);
   float tilt = (ax_mm > 0 ? 1.0f : -1.0f) * (float)ADJ_AXIAL_SIGN;
   uint8_t rc;
-  printf("ADJ axial L=%dmm d=%dmm\r\n", (int)L, (int)d);
+  {
+    char lb[40];
+    snprintf(lb, sizeof(lb), "axial ax=%d L=%d d=%d", (int)ax_mm, (int)L, (int)d);
+    Adj_Log(lb);
+  }
   rc = Adj_Spin( tilt * ADJ_DIAG_BETA_DEG);  if(rc) return rc;
   if(Adj_Settle()) return 1;
   rc = Adj_Move( +L );                       if(rc) return rc;   /* 斜着下去 */
@@ -1140,9 +1185,12 @@ uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
   if(fabsf(phi) < ADJ_TOL_PHI) phi = 0;
   if(fabsf(psi) < ADJ_TOL_PSI) psi = 0;
   if(fabsf(ax)  < ADJ_TOL_AX)  ax  = 0;
-  printf("ADJ start in phi=%d psi=%d ax=%d -> out phi=%d psi=%d ax=%d (max %d/%d/%d)\r\n",
-         (int)phi_deg, (int)psi_deg, (int)ax_mm, (int)phi, (int)psi, (int)ax,
-         (int)(ADJ_MAX_PHI * ADJ_DEMO_GAIN), (int)(ADJ_MAX_PSI * ADJ_DEMO_GAIN), (int)ADJ_MAX_AX);
+  {
+    char lb[32];
+    snprintf(lb, sizeof(lb), "in %d/%d/%d -> %d/%d/%d", (int)phi_deg, (int)psi_deg, (int)ax_mm,
+             (int)phi, (int)psi, (int)ax);
+    Adj_Log(lb);
+  }
   if(ax != 0){ rc = Adj_Axial(ax); if(rc) goto out; }              /* 最扰动先走 */
   if(Adj_Settle()){ rc = 1; goto out; }
   if(psi != 0){ rc = Adj_Spin(-psi * (float)ADJ_SPIN_SIGN); if(rc) goto out; }
@@ -1150,7 +1198,11 @@ uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
   if(phi != 0){ rc = Adj_Move(phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN); if(rc) goto out; }
 out:
   motor_STOP();
-  printf("ADJ finish rc=%u\r\n", rc);
+  {
+    char lb[32];
+    snprintf(lb, sizeof(lb), "finish rc=%u", (unsigned)rc);
+    Adj_Log(lb);
+  }
   return rc;
 }
 /* 纠偏等待循环(GO_UP到位且已武装时进入):
