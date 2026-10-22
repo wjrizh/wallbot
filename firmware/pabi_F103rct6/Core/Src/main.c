@@ -975,9 +975,8 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_TOL_PHI         0.5f     /* 死区(deg) */
 #define ADJ_TOL_PSI         0.5f
 #define ADJ_TOL_AX          2.0f     /* 死区(mm), 以内交给夹爪容差 */
-#define ADJ_MAX_PHI         45.0f    /* 单次限幅(deg). 原 10 把输入 50 砍成 10,
-                                     弧长只剩 52mm 而非 262mm, 用户感觉"给多大都动得微小" */
-#define ADJ_MAX_PSI         45.0f
+#define ADJ_MAX_PHI         90.0f    /* 单次限幅(deg). phi 由 asin 反解, 物理值域 ±90 */
+#define ADJ_MAX_PSI         45.0f    /* psi 是航向角, 单次纠 45 度已足够 */
 #define ADJ_MAX_AX          30.0f    /* 单次限幅(mm) */
 #define ADJ_SETTLE_MS       150      /* 段间刹车稳定等待 */
 #define ADJ_DEMO_GAIN       1.0f     /* 放大倍数. 迭代纠偏要求面板能按实测里程扣减剩余偏差,
@@ -993,6 +992,9 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_PRELOAD_I       1200.0f  /* 段起始预充 PID 积分. 从 0 爬要 2.2s 才越过静摩擦死区,
                                         期间轮子完全不动, 越过死区又猛冲过冲.
                                         预充后起步占空比约 (1200+540)/4199 = 41% */
+#define ADJ_TEST_SCALE      3.0f     /* ⚠️测试用倍率: 把 φ/ψ 算出的位移目标整体放大, 便于肉眼观察.
+                                        只作用于 Move/Spin 的入参, 不改钳位与几何常数.
+                                        正式部署前必须设回 1.0 */
 #define ADJ_SPEED_REV_SLOW  3.0f     /* 测试用慢速(电机转/s), 便于肉眼观察 */
 #define ADJ_TEST_PHI        5.0f     /* 自检演示值(配合占位常数观察动作方向) */
 #define ADJ_TEST_PSI        (-3.0f)
@@ -1048,9 +1050,10 @@ static uint8_t Adj_Move(float dist_mm){
     uint32_t t_tel = 0;
     int8_t   dir = (dist_mm > 0) ? 1 : -1;
     while(1){
-      /* 直行: A/B 必须同号同速. v 的符号由 dist_mm 定 */
-      if(dist_mm > 0){ PID_MA(+v); PID_MB(+v); }
-      else           { PID_MA(-v); PID_MB(-v); }
+      /* 直行: A/B 反号. 本机两轮跨管道两侧对滚, 与 PID_IMU 里"下去"分支
+         PID_MB(v) + PID_MA(-v) 一致. 原同号写法实际产生的是绕管道自转 */
+      if(dist_mm > 0){ PID_MA(+v); PID_MB(-v); }
+      else           { PID_MA(-v); PID_MB(+v); }
       HAL_Delay(10);
       Adj_OdomUpdate(&od);
       {
@@ -1062,7 +1065,7 @@ static uint8_t Adj_Move(float dist_mm){
           if(pct > 100) pct = 100;
           t_tel = HAL_GetTick();
           {
-            char lb[40];
+            char lb[52];
             snprintf(lb, sizeof(lb), "mv d=%d A=%d B=%d p=%d",
                      (int)dist_mm, (int)od.a_mm, (int)od.b_mm, (int)pct);
             Adj_Log(lb);
@@ -1115,9 +1118,9 @@ static uint8_t Adj_Spin(float theta_deg){
     uint32_t t_tel = 0;
     int8_t   dir = (theta_deg * (float)ADJ_SPIN_SIGN > 0) ? 1 : -1;
     while(1){
-      /* 原地转: A/B 反向 (与 Move 相反) */
-      if(theta_deg * (float)ADJ_SPIN_SIGN > 0){ PID_MA(+v); PID_MB(-v); }
-      else                                     { PID_MA(-v); PID_MB(+v); }
+      /* 自转: A/B 同号. 与直行(反号)相反. 原反号写法实际产生的是沿管道直行 */
+      if(theta_deg * (float)ADJ_SPIN_SIGN > 0){ PID_MA(+v); PID_MB(+v); }
+      else                                     { PID_MA(-v); PID_MB(-v); }
       HAL_Delay(10);
       Adj_OdomUpdate(&od);
       {
@@ -1130,7 +1133,7 @@ static uint8_t Adj_Spin(float theta_deg){
           if(pct > 100) pct = 100;
           t_tel = HAL_GetTick();
           {
-            char lb[40];
+            char lb[52];
             snprintf(lb, sizeof(lb), "sp t=%d arc=%d A=%d B=%d p=%d",
                      (int)theta_deg, (int)arc, (int)od.a_mm, (int)od.b_mm, (int)pct);
             Adj_Log(lb);
@@ -1155,7 +1158,7 @@ static uint8_t Adj_Spin(float theta_deg){
   }
   motor_STOP();
   {
-    char lb[40];
+    char lb[52];
     snprintf(lb, sizeof(lb), "spin t=%d ok arc=%d A=%d B=%d",
              (int)theta_deg, (int)arc, (int)od.a_mm, (int)od.b_mm);
     Adj_Log(lb);
@@ -1171,7 +1174,7 @@ static uint8_t Adj_Axial(float ax_mm){
   float tilt = (ax_mm > 0 ? 1.0f : -1.0f) * (float)ADJ_AXIAL_SIGN;
   uint8_t rc;
   {
-    char lb[40];
+    char lb[52];
     snprintf(lb, sizeof(lb), "axial ax=%d L=%d d=%d", (int)ax_mm, (int)L, (int)d);
     Adj_Log(lb);
   }
@@ -1199,15 +1202,15 @@ uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
   if(fabsf(ax)  < ADJ_TOL_AX)  ax  = 0;
   {
     char lb[32];
-    snprintf(lb, sizeof(lb), "in %d/%d/%d -> %d/%d/%d", (int)phi_deg, (int)psi_deg, (int)ax_mm,
-             (int)phi, (int)psi, (int)ax);
+    snprintf(lb, sizeof(lb), "in %d/%d/%d -> %d/%d/%d x%d", (int)phi_deg, (int)psi_deg, (int)ax_mm,
+             (int)phi, (int)psi, (int)ax, (int)ADJ_TEST_SCALE);
     Adj_Log(lb);
   }
   if(ax != 0){ rc = Adj_Axial(ax); if(rc) goto out; }              /* 最扰动先走 */
   if(Adj_Settle()){ rc = 1; goto out; }
-  if(psi != 0){ rc = Adj_Spin(-psi * (float)ADJ_SPIN_SIGN); if(rc) goto out; }
+  if(psi != 0){ rc = Adj_Spin(ADJ_TEST_SCALE * -psi * (float)ADJ_SPIN_SIGN); if(rc) goto out; }
   if(Adj_Settle()){ rc = 1; goto out; }
-  if(phi != 0){ rc = Adj_Move(phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN); if(rc) goto out; }
+  if(phi != 0){ rc = Adj_Move(ADJ_TEST_SCALE * phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN); if(rc) goto out; }
 out:
   motor_STOP();
   {
