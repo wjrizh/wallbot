@@ -138,7 +138,14 @@ void TestMode_Tick(void) {
         }
     }
 
-    if ((int32_t)(millis() - s_deadline) >= 0) {
+    /* TM_READY 是稳态: 等用户点"发送模拟偏差", 不该有超时.
+       原先进入 READY 时没更新 s_deadline, 仍是 WAIT_TSTB 的期限,
+       TSTB 一到就被判超时 (实测 timeout in state 3) */
+    if (s_state == TM_READY) return;
+
+    /* 就绪态不等待回复; 不能沿用 TSTB/DONE 的旧截止时间把测试误判超时。 */
+    if ((s_state == TM_WAIT_TSTB || s_state == TM_WAIT_DONE) &&
+        (int32_t)(millis() - s_deadline) >= 0) {
         Serial.printf("[TEST] timeout in state %u\n", s_state);
         s_last_rc = 3;
         s_state = TM_IDLE;

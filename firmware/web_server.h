@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void WebServer_Init(void);
+void WebServer_Tick(void);
 void WebServer_PushLaser(void);
 void WebServer_RefreshIMU(void);
 float WebServer_GetIMURoll(void);

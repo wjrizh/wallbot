@@ -35,6 +35,7 @@ static volatile float g_imu_roll_cached = 0.0f;
 static const uint16_t DISCOVERY_PORT = 48899;
 static const char* DISCOVERY_REQ = "WALLBOT_DISCOVER";
 static WiFiUDP g_discovery_udp;
+static bool g_ws_wifi_ok = false;
 
 static void Task_Discovery(void *pvParameters) {
     (void)pvParameters;
@@ -272,20 +273,12 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
 void WebServer_Init(void) {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    /* 诊断: 扫描可见热点 */
-    int n = WiFi.scanNetworks();
-    Serial.printf("[WiFi] scan: %d networks\n", n);
-    for (int i = 0; i < n && i < 15; i++) {
-        Serial.printf("[WiFi]   %s (%d dBm) ch=%d enc=%d\n",
-                      WiFi.SSID(i).c_str(), WiFi.RSSI(i),
-                      WiFi.channel(i), (int)WiFi.encryptionType(i));
-    }
-    WiFi.scanDelete();
-    /* DHCP: 从热点获取与热点同网段的地址, 避免静态 IP 与热点网段不匹配 */
+    /* 关掉开机诊断扫描: scanNetworks() 耗时 2-4s, 会推迟 WS 服务就绪.
+       DHCP: 从热点获取与热点同网段的地址, 避免静态 IP 与热点网段不匹配 */
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.printf("[WiFi] STA connecting to %s ...\n", WIFI_SSID);
     uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 <20000) {
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 8000) {
         delay(500);
         Serial.print(".");
     }
@@ -323,8 +316,35 @@ void WebServer_Init(void) {
     server.begin();
     Serial.println("[Web] HTTP + WS 二进制协议 已启动");
 
-    if (WiFi.status() == WL_CONNECTED) {
-        xTaskCreate(Task_Discovery, "Discovery", 4096, NULL, 1, NULL);
+    /* Discovery 任务无条件启动: 未连上时 UDP 收不到包, 不影响;
+       连上后即可应答, 避免 WiFi 晚连导致发现能力永久缺失 */
+    xTaskCreate(Task_Discovery, "Discovery", 4096, NULL, 1, NULL);
+    g_ws_wifi_ok = (WiFi.status() == WL_CONNECTED);
+}
+
+/* 由周期任务调用: WiFi 掉线自动重连, 状态变化时打印 */
+void WebServer_Tick(void) {
+    static uint32_t last_try = 0;
+    static uint32_t last_log = 0;
+    wl_status_t st = WiFi.status();
+    if (st == WL_CONNECTED) {
+        if (!g_ws_wifi_ok) {
+            g_ws_wifi_ok = true;
+            Serial.printf("[WiFi] reconnected, IP: %s\n", WiFi.localIP().toString().c_str());
+        }
+        return;
+    }
+    if (g_ws_wifi_ok) {
+        g_ws_wifi_ok = false;
+        Serial.printf("[WiFi] lost (status=%d), reconnecting\n", (int)st);
+    }
+    uint32_t now = millis();
+    if (now - last_try < 3000) return;
+    last_try = now;
+    WiFi.reconnect();
+    if (now - last_log > 15000) {
+        last_log = now;
+        Serial.printf("[WiFi] retry connect %s (status=%d)\n", WIFI_SSID, (int)st);
     }
 }
 

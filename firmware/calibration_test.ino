@@ -33,6 +33,7 @@ static void Task_PushLaser(void *pvParameters) {
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
         WebServer_PushLaser();
         WebServer_PushTestStatus();
+        WebServer_Tick();   /* WiFi 掉线自动重连 */
         AlignBridge_Tick();   /* 视觉纠偏闭环 (HTTP 拉取, 内部按 500ms 节流) */
     }
 }
