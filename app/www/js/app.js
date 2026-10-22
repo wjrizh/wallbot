@@ -76,7 +76,7 @@
     0x01: '单舵机', 0x02: '全舵机', 0x03: '真空泵', 0x04: 'CAN角度', 0x05: 'CAN命令',
     0x09: '自动纠偏', 0x0A: '纠偏急停', 0x11: '越障', 0x12: '启停',
     0x13: '迈步', 0x14: '掉头', 0x18: '手柄', 0x19: '启动协同', 0x1B: '夹持器',
-    0x1C: '避障行走'
+    0x1C: '避障行走', 0x30: '开始测试', 0x31: '模拟偏差', 0x32: '结束测试'
   };
 
   App.prototype._onAck = function (ack) {
@@ -275,7 +275,7 @@
       UI.log('[地址] 复用缓存: 母机=' + (this.transport.getHost() || '-') +
              ' 摄像头母机=' + (cam ? cam.getIp('host') || '-' : '-') +
              ' 摄像头子机=' + (cam ? cam.getIp('child') || '-' : '-'));
-      this._scheduleDiscoverFallback(6000);
+      this._scheduleDiscoverFallback(2500);
     } else {
       this._autoDiscover('启动无缓存');
     }
@@ -302,7 +302,6 @@
   /* WebSocket 断开: 缓存地址连不上才重新发现, 连过又断先靠重连 */
   App.prototype._onWsOffline = function (info) {
     if (this._discovering) return;
-    if (this._discoverTimer) return;
     if (!this.transport.getHost()) return;
 
     var everOnline = info && info.everOnline;
@@ -311,8 +310,15 @@
       UI.log('[连接] 掉线重连中 (第 ' + (retry + 1) + ' 次)');
       return;
     }
+    /* 缓存地址从未连上: 不等兜底定时器到期, 立刻缩短到 500ms 触发发现.
+       原先此处 if(this._discoverTimer) return 会让用户干等满兜底时长 */
+    if (!everOnline) {
+      UI.log('[连接] 地址 ' + this.transport.getHost() + ' 连不上, 即将重新发现');
+      this._scheduleDiscoverFallback(500);
+      return;
+    }
     UI.log('[连接] 地址 ' + this.transport.getHost() + ' 连不上, 触发重新发现');
-    this._scheduleDiscoverFallback(everOnline ? 3000 : 1000);
+    this._scheduleDiscoverFallback(3000);
   };
 
   /* 某路摄像头重试耗尽: 清掉该路缓存并重新发现
@@ -348,6 +354,11 @@
       this.transport.resetForNewHost();
       this.transport.disconnect();
       this.transport.connect();
+    } else if (host && !this.transport.isOnline()) {
+      /* 发现的 IP 与缓存相同但 WS 还没连上 (母机刚启动 WS 未就绪), 催一次 */
+      UI.log('[发现] 母机 ' + host + ' (与缓存一致, 重连)');
+      this.transport.resetForNewHost();
+      this.transport.connect();
     }
 
     var cam = this._cameraModule();
@@ -357,8 +368,12 @@
       cam.connect();
     }
     this._syncHostInputs();
-    if (!host && !res.camHost && !res.camChild) UI.log('[发现] 未收到任何设备应答');
-    else if (this.transport.isOnline()) this._clearDiscoverTimer();
+    if (!host && !res.camHost && !res.camChild) {
+      UI.log('[发现] 未收到任何设备应答, 2s 后重试');
+      this._scheduleDiscoverFallback(2000);
+    } else if (this.transport.isOnline()) {
+      this._clearDiscoverTimer();
+    }
   };
 
   App.prototype._clearDiscoverTimer = function () {

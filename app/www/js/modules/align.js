@@ -159,7 +159,7 @@
 
     var btnSend = this._el("button", "btn btn-primary btn-wide", "发送模拟偏差");
     btnSend.style.marginTop = "8px";
-    btnSend.addEventListener("click", function () { self._send(); });
+    btnSend.addEventListener("click", function () { self._sendAdj(); });
     body.appendChild(btnSend);
 
     /* ---- ③ 差速轮示意 ---- */
