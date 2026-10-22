@@ -947,11 +947,12 @@ uint32_t Flash_ReadNUM[2] = {0};
  * 每个子动作: 轮速PID慢速 + 编码器里程计计数到量即停 + 超时 + 每10ms轮询中止
  * 返回: 0=完成 1=被中止(STOP/遥控) 2=超时/打滑 */
 #define ADJ_PI              3.14159265f
-#define ADJ_SPEED_REV       80.0f    /* 纠偏行驶速度(电机轴转/s). kp*err=18*80=1440 -> 占空比34%. 3.0f时仅1.3% 低于静摩擦死区 */
+#define ADJ_SPEED_REV       12.0f    /* 纠偏行驶速度(电机轴转/s), 轮面 12*15=180mm/s.
+                                     原 80 时轮面 1200mm/s, 几十mm 的目标 40ms 就跑完, 肉眼只见抖一下 */
 #define ADJ_MM_PER_MOTORREV 15.0f    /* ⚠️占位待标定: 里程计每"电机转"对应轮面行走毫米
                                      标定: 跑一段已知指令, 卷尺量实际距离, 按比例修此值 */
 #define ADJ_TRACK_MM        100.0f   /* ⚠️占位待标定: 两驱动轮接触点间距(mm) */
-#define ADJ_PIPE_R_MM       60.0f    /* ⚠️占位待标定: 管道外半径(mm), φ→弧长换算 */
+#define ADJ_PIPE_R_MM       300.0f   /* 管道半径(mm), 实测直径约60cm → R=300. 原占位 60 使 φ→弧长小 5 倍 */
 #define ADJ_DIAG_BETA_DEG   30.0f    /* 轴向斜行定角(deg), 最大自旋=2×β */
 #define ADJ_MV_SIGN         (+1)     /* 标定: φ>0 时应往哪边走(+1=下降方向) */
 #define ADJ_SPIN_SIGN       (+1)     /* 标定: ψ>0 时应往哪边转(+1=S+方向) */
@@ -1128,15 +1129,20 @@ static uint8_t Adj_Axial(float ax_mm){
 }
 /* 规划器入口: 三个偏差量 → 全部纠偏运动; 返回 0完成 1中止 2出错 */
 uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
-  float phi = Adj_Clamp(phi_deg, ADJ_MAX_PHI) * ADJ_DEMO_GAIN;
-  float psi = Adj_Clamp(psi_deg, ADJ_MAX_PSI) * ADJ_DEMO_GAIN;
+  /* 先放大再钳位: 原写法 Adj_Clamp(x,10)*5 会把任何 >=10 的输入都压成 50,
+     导致面板填 10/20/50 动作完全一样. 现在输入 2/5/10 分别得到 10/25/50,
+     只有超过 MAX_PHI 的输入才饱和 (日志会打印原始值与钳位值) */
+  float phi = Adj_Clamp(phi_deg * ADJ_DEMO_GAIN, ADJ_MAX_PHI * ADJ_DEMO_GAIN);
+  float psi = Adj_Clamp(psi_deg * ADJ_DEMO_GAIN, ADJ_MAX_PSI * ADJ_DEMO_GAIN);
   float ax  = Adj_Clamp(ax_mm,  ADJ_MAX_AX);
   uint8_t rc = 0;
   Clear_All_PID();
   if(fabsf(phi) < ADJ_TOL_PHI) phi = 0;
   if(fabsf(psi) < ADJ_TOL_PSI) psi = 0;
   if(fabsf(ax)  < ADJ_TOL_AX)  ax  = 0;
-  printf("ADJ start phi=%d psi=%d ax=%d\r\n", (int)phi, (int)psi, (int)ax);
+  printf("ADJ start in phi=%d psi=%d ax=%d -> out phi=%d psi=%d ax=%d (max %d/%d/%d)\r\n",
+         (int)phi_deg, (int)psi_deg, (int)ax_mm, (int)phi, (int)psi, (int)ax,
+         (int)(ADJ_MAX_PHI * ADJ_DEMO_GAIN), (int)(ADJ_MAX_PSI * ADJ_DEMO_GAIN), (int)ADJ_MAX_AX);
   if(ax != 0){ rc = Adj_Axial(ax); if(rc) goto out; }              /* 最扰动先走 */
   if(Adj_Settle()){ rc = 1; goto out; }
   if(psi != 0){ rc = Adj_Spin(-psi * (float)ADJ_SPIN_SIGN); if(rc) goto out; }
