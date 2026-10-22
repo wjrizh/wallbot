@@ -37,43 +37,69 @@
 
 /* ---- 摄像头 ---- */
 /* 流媒体分辨率/画质 (MJPEG 硬编码)
- * 固定 VGA 不再运行时切换: 切 framesize 会重置 GC2145 寄存器与 GDMA 链,
- * 正在推流的帧被截断(丢 EOI), WebView 的 MJPEG 解码器会定格,
- * 且画面尺寸跳变本身就不满足"检测时画面不变"的要求。
- * 检测侧用 esp_jpeg_decode 的 1/2 缩放直接从 VGA 解出 320x240。 */
-#define STREAM_FRAMESIZE      FRAMESIZE_VGA
-#define STREAM_JPEG_QUALITY   12
-#define STREAM_FB_COUNT       3      /* 3 缓冲: 推流与后台检测并发取帧时不至于 DMA 停摆 */
-/* ---- 检测分辨率 (固定, 不再是运行时的另一种相机模式) ----
- * VGA 帧经 JPEG_IMAGE_SCALE_1_2 解码后正好是 320x240,
- * tag_detector 的像素参数(EDGE_PX_MIN/ADAPT_WIN)全部沿用不变。 */
-#define ALIGN_DETECT_W          320
-#define ALIGN_DETECT_H          240
+ * 固定 SVGA, 运行时绝不切 framesize: 切分辨率会把正在推的 MJPEG 打断。
+ * 检测: JPEG 解成 800x600 灰度; 连通域与采码均在 800x600 全分辨率跑 (Phase A1)。
+ * 22mm @ ~30cm、~65° 镜头, 800 宽约 46px 黑框, 接近 5.8px/module。 */
+#define STREAM_FRAMESIZE      FRAMESIZE_SVGA
+/* ESP JPEG quality: 数字越小画质越高。8 比 12 更利格子解码, 略增带宽/解码耗时 (Phase A2) */
+#define STREAM_JPEG_QUALITY   8
+#define STREAM_FB_COUNT       3
+#define ALIGN_DETECT_W          800
+#define ALIGN_DETECT_H          600
 
-/* ---- AprilTag / 视觉纠偏几何参数 (与 code/tag_utils.py 保持一致) ---- */
-#define TAG_REAL_MM       22.0f  /* 标签黑框真实边长(mm), 实测 22mm */
-#define R_TAG_MM          60.0f  /* 标签黑框中心平面到管道轴线的垂直距离(mm), 贴好后必须实测 */
-#define PIPE_RADIUS_MM    60.0f  /* 管道内半径(mm), 仅用于把 phi 换算成沿管壁弧长 */
+/* ---- 路标模式 ----
+ * LANDMARK_DUAL_TAG: 两孔位各贴不同 ID 的 22mm tag36h11 (当前默认)
+ *   两中心中点 -> u,v; 小ID->大ID 连线 -> theta (消 180); 中心距 -> edge
+ * LANDMARK_CHASSIS / LANDMARK_APRILTAG: 备份 */
+#define LANDMARK_APRILTAG  0
+#define LANDMARK_CHASSIS   1
+#define LANDMARK_DUAL_TAG  2
+#define LANDMARK_MODE      LANDMARK_DUAL_TAG
 
-#define TAG_ID            0      /* 使用的标签 ID */
+#define TAG_REAL_MM         22.0f  /* 单枚码黑框边长(mm); 双码模式不用它做比例尺 */
+#define DUAL_TAG_SEP_MM     40.0f  /* ★两码中心实测距(mm), 卡尺量完必须改 */
+#define CHASSIS_HOLE_SEP_MM 45.0f  /* 双孔备份: 两腰形孔中心距(mm) */
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+#  define LANDMARK_MM  DUAL_TAG_SEP_MM
+#elif LANDMARK_MODE == LANDMARK_CHASSIS
+#  define LANDMARK_MM  CHASSIS_HOLE_SEP_MM
+#else
+#  define LANDMARK_MM  TAG_REAL_MM
+#endif
+
+#define R_TAG_MM          395.0f  /* 路标中心(双码中点)到管道轴线的垂直距离(mm), 贴好后必须实测 */
+#define PIPE_RADIUS_MM    250.0f  /* 管道内半径(mm), 仅用于把 phi 换算成沿管壁弧长 */
+
+#define TAG_ID_A          0      /* 双码第一枚 ID (须与 TAG_ID_B 不同) */
+#define TAG_ID_B          1      /* 双码第二枚 ID */
+#define TAG_ID            TAG_ID_A  /* 兼容旧单码路径 */
 
 /* ---- 检测器参数 ---- */
-#define DET_EDGE_PX_MIN   24     /* 黑框边长像素下限 (2x放大后 640x480 坐标) */
-#define DET_EDGE_PX_MAX   400    /* 黑框边长像素上限 (2x放大后 640x480 坐标) */
+#define DET_EDGE_PX_MIN   12     /* 全分辨率连通域: 25cm 约 33px 黑框, 12 留余量 */
+#define DET_EDGE_PX_MAX   280    /* 近距全分辨率上限 (原半分辨 200 的约 1.4x) */
 #define DET_MAX_HAMMING   1      /* 解码允许的最大汉明距离 */
-#define DET_CONTRAST_MIN  15.0f  /* 黑白电平最小对比度; 15 提升远处低对比 tag 检出 */
+#define DET_CONTRAST_MIN  25.0f  /* 黑白电平最小对比度 (抗全黑/全白误检) */
 #define DET_ADAPT_WIN     45     /* 自适应阈值窗口(奇数, 像素)。
                                   * 须大于最大标签的黑框厚度(edge_max/8*1=25px):
                                   * 窗口大->厚黑框核心也判暗(或成闭合厚环带), 不断裂 */
-#define DET_ADAPT_BIAS    18     /* 判黑偏置; 18 对小 tag 厚黑框更宽容 */
-#define DET_SMALL_WIN     15     /* 小 tag 专用窗口: 远处黑框 12~20px 时用 15 重跑一遍 */
+#define DET_ADAPT_BIAS    25     /* 判黑偏置: gray < mean - bias 视为暗。
+                                  * 取 ~2.5x 噪声sigma: 噪声误判率<1%, 背景不絮凝;
+                                  * 黑框会变细环带(连续等值线,不断裂), 由填洞补实心 */
 
-/* ---- 纠偏闭环参数 (执行文档 6.3 节: ANGLE_TOL=4°, 3 帧一致才采信) ---- */
-#define ALIGN_FRAMES        3      /* 每次测量连拍帧数 (识别要连续一致) */
-#define ALIGN_THETA_SPREAD  1.5f   /* 多帧 theta 一致性阈值 (deg) */
-#define ALIGN_UV_SPREAD     3.0f   /* 多帧中心一致性阈值 (px) */
+/* ---- 纠偏闭环参数 ----
+ * 双码方向稳定; Phase B: 2 帧共识略放宽, 手持间歇失败时更快出结果。 */
+#define ALIGN_FRAMES        2
+#define ALIGN_THETA_SPREAD  12.0f
+#define ALIGN_UV_SPREAD     24.0f
 #define ALIGN_ANGLE_TOL     4.0f   /* 夹取判据: |phi|,|psi| <= 4° (夹爪 5° 留 1° 裕量) */
 #define ALIGN_AXIAL_TOL_MM  20.0f  /* 轴向进/退偏差容差(mm), 夹爪开口容差相关 */
+
+/* Phase B soft-hold: when one of two tags briefly drops during consensus,
+ * reuse last good dual observation for that slot.
+ * TTL ~2500ms ≈ 1–2 detect cycles at current ~1–2s/frame.
+ * Timestamp refreshes only on a REAL dual success, never on hold reuse
+ * (so geometry is not invented forever). */
+#define DUAL_SOFT_HOLD_MS   2500
 
 /* ---- NVS 存储命名空间 (参考位掉电保存) ---- */
 #define ALIGN_NVS_NS        "wallbot-cam"

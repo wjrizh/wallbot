@@ -39,6 +39,9 @@ typedef struct {
     float best_contrast;  /* 最优候选的对比度 */
     float best_margin;
     int  stage;           /* 失败阶段: 0=ok 1=无连通域 2=候选全被筛掉 3=解码失败 */
+    int  tags_found;      /* 双码: 命中目标 ID 个数 0/1/2 */
+    int  found_id_a;      /* TAG_ID_A 找到则为该 ID, 否则 -1 */
+    int  found_id_b;
 } TagDiag;
 
 /* 在灰度图中检测 TAG_ID 标签; 找到返回 true 并填充 out。
@@ -48,5 +51,19 @@ bool TagDetector_Detect(const uint8_t *gray, int w, int h, int stride,
 
 bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
                           TagObservation *out, TagDiag *diag);
+
+/* 小车俯视双腰形孔检测, 输出填进同一套 TagObservation (u/v/theta/edge_a) */
+bool ChassisDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                              TagObservation *out, TagDiag *diag);
+
+/* 双码: 检出 TAG_ID_A 与 TAG_ID_B 并融合为一条观测
+ * 中点->u,v; 小ID->大ID 连线->theta; 中心距->edge_a(=edge_p)
+ * 只见到 0/1 个目标码返回 false, diag->tags_found 标明个数 */
+bool DualTagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                              TagObservation *out, TagDiag *diag);
+
+/* 按 config.h LANDMARK_MODE 分发 */
+bool Landmark_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                       TagObservation *out, TagDiag *diag);
 
 #endif /* WALLBOT_TAG_DETECTOR_H */

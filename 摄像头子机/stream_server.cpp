@@ -96,7 +96,13 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     }
 
     while (true) {
-        /* 分辨率固定 VGA, 本流全程出帧; 检测不再切 framesize, 画面尺寸恒定。 */
+        /* Phase A3: 纠偏租约有效时大幅降频推流, 把相机/CPU 让给 align_worker */
+        bool align_busy = AlignServer_LeaseActive();
+        if (align_busy) {
+            vTaskDelay(pdMS_TO_TICKS(400));
+        }
+
+        /* 分辨率固定 SVGA, 本流出帧; 检测不切 framesize, 画面尺寸恒定。 */
         fb = esp_camera_fb_get();
         if (!fb) {
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -125,7 +131,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         } else {
             /* 灰度模式防御分支 (固定 JPEG 后正常不会走到): 软编码失败只丢这一帧,
              * 不能断开流, 否则 /align/* 期间画面直接黑屏 */
-            if (!frame2jpg(fb, 12, &jpg_buf, &jpg_len)) {
+            if (!frame2jpg(fb, STREAM_JPEG_QUALITY, &jpg_buf, &jpg_len)) {
                 g_softenc_fail++;
                 esp_camera_fb_return(fb);
                 vTaskDelay(pdMS_TO_TICKS(10));
@@ -163,8 +169,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         res = httpd_resp_send_chunk(req, frame_buf, total);
         if (res != ESP_OK) break;
 
-        /* 让出 2ms 给低优先级任务 (loop 中的 UDP 发现) 与 IDLE 看门狗 */
-        vTaskDelay(pdMS_TO_TICKS(2));
+        /* 正常 2ms; 纠偏时再多让一点, 避免与 worker 抢 */
+        vTaskDelay(pdMS_TO_TICKS(align_busy ? 50 : 2));
     }
     if (frame_buf) free(frame_buf);
     return res;

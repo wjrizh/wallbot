@@ -21,7 +21,14 @@ void AlignMeasure_Init(void) {
     memset(&g_ref, 0, sizeof(g_ref));
     g_nvs.begin(ALIGN_NVS_NS, true);
     g_ref.valid = g_nvs.getBool("valid", false);
-    if (g_ref.valid) {
+    int dw = g_nvs.getInt("dw", 0);
+    int dh = g_nvs.getInt("dh", 0);
+    if (g_ref.valid && (dw != (int)ALIGN_DETECT_W || dh != (int)ALIGN_DETECT_H)) {
+        /* 旧固件 QVGA 参考位不能用在 VGA/SVGA 上, 否则 phi/psi 会飞 */
+        g_ref.valid = false;
+        Serial.printf("[ALIGN] 丢弃旧参考位 (saved %dx%d, now %dx%d)\n",
+                      dw, dh, ALIGN_DETECT_W, ALIGN_DETECT_H);
+    } else if (g_ref.valid) {
         g_ref.u      = g_nvs.getFloat("u", 0);
         g_ref.v      = g_nvs.getFloat("v", 0);
         g_ref.theta  = g_nvs.getFloat("th", 0);
@@ -48,6 +55,8 @@ bool AlignMeasure_SetRef(const TagObservation *obs) {
     g_nvs.putFloat("v", g_ref.v);
     g_nvs.putFloat("th", g_ref.theta);
     g_nvs.putFloat("ea", g_ref.edge_a);
+    g_nvs.putInt("dw", (int)ALIGN_DETECT_W);
+    g_nvs.putInt("dh", (int)ALIGN_DETECT_H);
     g_nvs.end();
     return true;
 }
@@ -67,7 +76,7 @@ bool AlignMeasure_Compute(const TagObservation *obs, Deviation *dev) {
     float dir_ax_x = cosf(th),  dir_ax_y = sinf(th);   /* 图像里管道轴线方向 */
     float dir_pp_x = -sinf(th), dir_pp_y = cosf(th);   /* 垂直管道方向 */
 
-    float scale = TAG_REAL_MM / (obs->edge_a > 1e-3f ? obs->edge_a : 1e-3f);
+    float scale = LANDMARK_MM / (obs->edge_a > 1e-3f ? obs->edge_a : 1e-3f);
     float du = obs->u - g_ref.u;
     float dv = obs->v - g_ref.v;
     float axial = (du * dir_ax_x + dv * dir_ax_y) * scale;

@@ -159,13 +159,8 @@ static bool view_process_frame(uint8_t **out_jpg, size_t *out_len) {
         return false;
     }
     const int w = ALIGN_DETECT_W, h = ALIGN_DETECT_H;
-    if (fb->width != w || fb->height != h) {
-        /* 检测模式未生效(仍是 HD), 本帧丢弃并等待下一帧 */
-        esp_camera_fb_return(fb);
-        if ((g_view_fail++ % 20) == 0)
-            Stream_Log("view fb size=%dx%d (expect %dx%d)", (int)fb->width, (int)fb->height, w, h);
-        return false;
-    }
+    /* 相机固定 SVGA, 解码器把 JPEG 解成 ALIGN_DETECT_W x H; 这里不再要求
+     * fb 宽高已经等于检测尺寸 (以前切 QVGA 时才成立)。 */
     if (!s_view_gray) {
         s_view_gray = (uint8_t *)heap_caps_malloc((size_t)w * h, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_view_gray) s_view_gray = (uint8_t *)malloc((size_t)w * h);
@@ -187,7 +182,7 @@ static bool view_process_frame(uint8_t **out_jpg, size_t *out_len) {
     bool ok = false;
     if (decoded) {
         memcpy(s_view_gray, gray, (size_t)w * h);
-        ok = TagDetector_DetectEx(s_view_gray, w, h, w, &obs, &diag);
+        ok = Landmark_DetectEx(s_view_gray, w, h, w, &obs, &diag);
     }
     if (g_measure_lock) xSemaphoreGive(g_measure_lock);
     esp_camera_fb_return(fb);
@@ -223,11 +218,21 @@ static bool view_process_frame(uint8_t **out_jpg, size_t *out_len) {
     snprintf(line[2], sizeof(line[2]), "DROP S%d L%d F%d A%d",
              diag.drop_small, diag.drop_large, diag.drop_fill, diag.drop_aspect);
     if (ok) {
-        snprintf(line[3], sizeof(line[3]), "OK ID%d HAM%d C%d",
-                 obs.id, obs.hamming, (int)obs.contrast);
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+        snprintf(line[3], sizeof(line[3]), "OK DUAL SEP%.0f TH%.0f",
+                 obs.edge_a, obs.theta * 180.0f / 3.14159265f);
+#else
+        snprintf(line[3], sizeof(line[3]), "OK SEP%.0f TH%.0f",
+                 obs.edge_a, obs.theta * 180.0f / 3.14159265f);
+#endif
     } else {
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+        snprintf(line[3], sizeof(line[3]), "FAIL N%d ST%d HAM%d",
+                 diag.tags_found, diag.stage, diag.best_hamming);
+#else
         snprintf(line[3], sizeof(line[3]), "FAIL ST%d HAM%d TRY%d",
                  diag.stage, diag.best_hamming, diag.decode_tried);
+#endif
     }
 
     const int scale = 2;

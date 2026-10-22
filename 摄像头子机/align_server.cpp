@@ -7,11 +7,12 @@
  *      |phi|>4° 发 MV,arc 给子机; |psi|>4° 发 SPIN,-psi; 全达标 -> 夹取
  *
  * 架构 (关键: 检测与推流解耦):
- *   - align_worker_task 后台循环: 取帧 -> JPEG 1/2 缩放解码 -> 灰度 -> 检测
+ *   - align_worker_task 后台循环: 取帧 -> JPEG 解成 640x480 灰度 -> 检测
  *     -> 更新 ALIGN_FRAMES 帧滑动窗口共识, 每帧后主动让出 CPU
  *   - 取帧优先向 :81/stream 索要旁路帧 (AlignServer_FeedFrame 投喂, memcpy <0.2ms)
  *     若 :81/stream 无活动 (>250ms 未投喂), worker 自行 esp_camera_fb_get()
- *   - /align/get 只续租 3s 并读缓存, <1ms 返回, 绝不触碰相机与算法
+ *   - /align/get 只读缓存, <1ms, 不续租 (不触发检测)
+ *   - /align/once 点测一次: 激活→等 ALIGN_FRAMES 共识→释租
  */
 #include <Arduino.h>
 #include "esp_camera.h"
@@ -70,8 +71,8 @@ static bool measure_bufs_init(void) {
 }
 
 /* JPEG 帧 -> 灰度 (检测用)。
- * 640x480 走 JPEG_IMAGE_SCALE_1_2 在解码器内部直接缩到 320x240;
- * 320x240 输入则不缩放。其他尺寸一律拒绝。 */
+ * 相机固定 VGA: 640x480 走 JPEG_IMAGE_SCALE_0;
+ * 1280x960 才走 1/2。其他尺寸一律拒绝。 */
 bool AlignDecodeJpegToGray(const uint8_t *jpg, size_t jlen, int fw, int fh,
                            const uint8_t **out_gray, int *out_w, int *out_h) {
     if (!jpg || jlen == 0) return false;
@@ -116,7 +117,7 @@ bool AlignDecodeJpegToGray(const uint8_t *jpg, size_t jlen, int fw, int fh,
 }
 
 /* ================= 旁路帧投喂槽 ================= */
-#define FEED_JPG_MAX  (48 * 1024)
+#define FEED_JPG_MAX  (128 * 1024)  /* SVGA JPEG quality8 更大, 留余量 */
 static uint8_t *s_feed_jpg = NULL;
 static size_t   s_feed_len = 0;
 static int      s_feed_w = 0, s_feed_h = 0;
@@ -134,10 +135,24 @@ static TagObservation s_win_obs[ALIGN_FRAMES];
 static int            s_win_count = 0;
 static TagObservation s_consensus_obs;
 static bool           s_consensus_ok = false;
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
 static char           s_consensus_reason[32] = "no_tag";
+#elif LANDMARK_MODE == LANDMARK_CHASSIS
+static char           s_consensus_reason[32] = "no_chassis";
+#else
+static char           s_consensus_reason[32] = "no_tag";
+#endif
 static uint32_t       s_last_dt_ms = 0;
-static TagObservation s_last_good;      /* 最近一次单帧有效观测 (记参考位兜底用) */
-static bool           s_last_good_ok = false;
+static TagObservation s_last_raw;
+static bool           s_have_raw = false;
+
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+/* Phase B soft-hold cache: last REAL dual observation + age.
+ * Used only when current frame sees exactly one of the two target tags. */
+static TagObservation s_hold_obs;
+static bool           s_hold_valid = false;
+static uint32_t       s_hold_ms = 0;
+#endif
 
 /* 供 :81/stream 调用: 仅当 worker 正在等帧时才拷走一帧, 耗时 <0.2ms */
 void AlignServer_FeedFrame(const uint8_t *jpg, size_t len, int w, int h) {
@@ -156,17 +171,63 @@ void AlignServer_FeedFrame(const uint8_t *jpg, size_t len, int w, int h) {
     portEXIT_CRITICAL(&s_feed_mux);
 }
 
+bool AlignServer_LeaseActive(void) {
+    return (int32_t)(s_detect_active_until - millis()) > 0;
+}
+
+/* 按路标模式填失败原因 */
+static void set_fail_reason(int tags_found) {
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+    if (tags_found == 1) strcpy(s_consensus_reason, "need_two_tags");
+    else strcpy(s_consensus_reason, "no_tag");
+#elif LANDMARK_MODE == LANDMARK_CHASSIS
+    (void)tags_found;
+    strcpy(s_consensus_reason, "no_chassis");
+#else
+    (void)tags_found;
+    strcpy(s_consensus_reason, "no_tag");
+#endif
+}
+
 /* 滑动窗口一致性校验 */
-static void update_sliding_consensus(bool got, const TagObservation *o, uint32_t dt_ms) {
+static void update_sliding_consensus(bool got, const TagObservation *o, uint32_t dt_ms,
+                                     int tags_found) {
+    TagObservation hold_local;
+    bool from_hold = false;
     portENTER_CRITICAL(&s_res_mux);
     s_last_dt_ms = dt_ms;
+
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+    /* Soft-hold: one tag briefly missing -> reuse last good dual for this slot.
+     * Require tags_found==1 (still seeing something). nfound==0 fails normally.
+     * TTL from last REAL dual only; hold reuse does not refresh s_hold_ms. */
+    if (!got && tags_found == 1 && s_hold_valid &&
+        (uint32_t)(millis() - s_hold_ms) <= (uint32_t)DUAL_SOFT_HOLD_MS) {
+        hold_local = s_hold_obs;
+        o = &hold_local;
+        got = true;
+        from_hold = true;
+    }
+#endif
+
     if (!got) {
         s_win_count = 0;
         s_consensus_ok = false;
-        strcpy(s_consensus_reason, "no_tag");
+        set_fail_reason(tags_found);
         portEXIT_CRITICAL(&s_res_mux);
         return;
     }
+
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+    if (!from_hold) {
+        s_hold_obs = *o;
+        s_hold_valid = true;
+        s_hold_ms = millis();  /* only real dual refreshes TTL */
+    }
+#endif
+
+    s_last_raw = *o;
+    s_have_raw = true;
     if (s_win_count < ALIGN_FRAMES) {
         s_win_obs[s_win_count++] = *o;
     } else {
@@ -180,20 +241,31 @@ static void update_sliding_consensus(bool got, const TagObservation *o, uint32_t
         return;
     }
 
-    float th_min = 1e9f, th_max = -1e9f;
-    float u_min = 1e9f, u_max = -1e9f, v_min = 1e9f, v_max = -1e9f;
+    /* 双孔朝向有 180° 歧义: 先把后续帧翻到与第 0 帧同一侧, 再量圆差 */
+    float th0 = s_win_obs[0].theta;
+    float th_absmax = 0, u_min = 1e9f, u_max = -1e9f, v_min = 1e9f, v_max = -1e9f;
     float sin_sum = 0, cos_sum = 0;
     for (int k = 0; k < ALIGN_FRAMES; k++) {
-        if (s_win_obs[k].theta < th_min) th_min = s_win_obs[k].theta;
-        if (s_win_obs[k].theta > th_max) th_max = s_win_obs[k].theta;
+        float th = s_win_obs[k].theta;
+        float d = th - th0;
+        while (d > (float)M_PI) d -= 2.0f * (float)M_PI;
+        while (d < -(float)M_PI) d += 2.0f * (float)M_PI;
+        if (fabsf(d) > (float)M_PI * 0.5f) {
+            th += (d > 0) ? -(float)M_PI : (float)M_PI;
+            d = th - th0;
+            while (d > (float)M_PI) d -= 2.0f * (float)M_PI;
+            while (d < -(float)M_PI) d += 2.0f * (float)M_PI;
+        }
+        s_win_obs[k].theta = th;
+        if (fabsf(d) > th_absmax) th_absmax = fabsf(d);
         if (s_win_obs[k].u < u_min) u_min = s_win_obs[k].u;
         if (s_win_obs[k].u > u_max) u_max = s_win_obs[k].u;
         if (s_win_obs[k].v < v_min) v_min = s_win_obs[k].v;
         if (s_win_obs[k].v > v_max) v_max = s_win_obs[k].v;
-        sin_sum += sinf(s_win_obs[k].theta);
-        cos_sum += cosf(s_win_obs[k].theta);
+        sin_sum += sinf(th);
+        cos_sum += cosf(th);
     }
-    if ((th_max - th_min) * 180.0f / (float)M_PI > ALIGN_THETA_SPREAD ||
+    if (th_absmax * 180.0f / (float)M_PI > ALIGN_THETA_SPREAD ||
         (u_max - u_min) > ALIGN_UV_SPREAD || (v_max - v_min) > ALIGN_UV_SPREAD) {
         s_consensus_ok = false;
         strcpy(s_consensus_reason, "jitter");
@@ -306,24 +378,16 @@ static void align_worker_task(void *arg) {
             const uint8_t *gray = NULL;
             int gw = 0, gh = 0;
             if (AlignDecodeJpegToGray(s_feed_jpg, frame_len, frame_w, frame_h, &gray, &gw, &gh)) {
-                got = TagDetector_DetectEx(gray, gw, gh, gw, &o, &d);
+                got = Landmark_DetectEx(gray, gw, gh, gw, &o, &d);
                 g_last_diag = d;
-                if (got) {
-                    s_diag_detect_ok++;
-                    portENTER_CRITICAL(&s_res_mux);
-                    s_last_good = o;
-                    s_last_good_ok = true;
-                    portEXIT_CRITICAL(&s_res_mux);
-                } else {
-                    s_diag_detect_fail++;
-                }
+                if (got) s_diag_detect_ok++; else s_diag_detect_fail++;
             } else {
                 s_diag_decode_fail++;
             }
             xSemaphoreGive(g_measure_lock);
         }
         uint32_t dt = millis() - t0;
-        update_sliding_consensus(got, &o, dt);
+        update_sliding_consensus(got, &o, dt, d.tags_found);
 
         /* 主动让出 CPU, 保证 WiFi 栈、:81 推流与 loop() UDP 发现不被饿死 */
         vTaskDelay(pdMS_TO_TICKS(25));
@@ -331,44 +395,28 @@ static void align_worker_task(void *arg) {
 }
 
 /* ---- GET /align/get (非阻塞读缓存, <1ms 返回) ---- */
+/* 读缓存结果, 不续租 (页面轮询也不会触发检测) */
 static esp_err_t handle_align_get(httpd_req_t *req) {
     char buf[384];
-    s_detect_active_until = millis() + 3000;   /* 续租 3s, 让 worker 继续检测 */
 
     const AlignRefPose *ref = AlignMeasure_GetRef();
-    /* 无参考位时不直接报 no_ref: 仍返回原始观测 (u/v/theta/edge),
-     * 让页面不点"记参考位"也能看到实时检测数据。 */
     if (!ref->valid) {
-        TagObservation o;
-        bool has;
-        uint32_t dt;
-        portENTER_CRITICAL(&s_res_mux);
-        has = s_last_good_ok;
-        o = s_last_good;
-        dt = s_last_dt_ms;
-        portEXIT_CRITICAL(&s_res_mux);
+        snprintf(g_last_reason, sizeof(g_last_reason), "no_ref");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        if (!has) {
-            snprintf(g_last_reason, sizeof(g_last_reason), "no_tag");
-            return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"no_tag\"}", HTTPD_RESP_USE_STRLEN);
-        }
-        snprintf(g_last_reason, sizeof(g_last_reason), "no_ref");
-        int n = snprintf(buf, sizeof(buf),
-            "{\"ok\":true,\"no_ref\":true,\"dt_ms\":%u,\"id\":%d,\"hamming\":%d,"
-            "\"u\":%.1f,\"v\":%.1f,\"theta_deg\":%.2f,\"edge_px\":%.1f}",
-            (unsigned)dt, o.id, o.hamming, (double)o.u, (double)o.v,
-            (double)(o.theta * 180.0f / (float)M_PI), (double)o.edge_a);
-        return httpd_resp_send(req, buf, n);
+        return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"no_ref\"}", HTTPD_RESP_USE_STRLEN);
     }
 
     TagObservation avg;
-    bool got;
+    TagObservation raw;
+    bool got, have_raw;
     char reason[32];
     uint32_t dt;
     portENTER_CRITICAL(&s_res_mux);
     got = s_consensus_ok;
     avg = s_consensus_obs;
+    raw = s_last_raw;
+    have_raw = s_have_raw;
     strncpy(reason, s_consensus_reason, sizeof(reason) - 1);
     reason[sizeof(reason) - 1] = '\0';
     dt = s_last_dt_ms;
@@ -379,7 +427,8 @@ static esp_err_t handle_align_get(httpd_req_t *req) {
     if (!got) {
         snprintf(g_last_reason, sizeof(g_last_reason), "%s", reason);
         int n = snprintf(buf, sizeof(buf),
-                         "{\"ok\":false,\"reason\":\"%s\",\"dt_ms\":%u}", reason, (unsigned)dt);
+                         "{\"ok\":false,\"reason\":\"%s\",\"dt_ms\":%u,\"edge_px\":%.1f}",
+                         reason, (unsigned)dt, have_raw ? (double)raw.edge_a : 0.0);
         return httpd_resp_send(req, buf, n);
     }
 
@@ -396,12 +445,122 @@ static esp_err_t handle_align_get(httpd_req_t *req) {
         "{\"ok\":true,\"dt_ms\":%u,\"id\":%d,\"hamming\":%d,"
         "\"phi_deg\":%.2f,\"psi_deg\":%.2f,\"phi_shape_deg\":%.2f,"
         "\"axial_mm\":%.1f,\"arc_mm\":%.1f,\"perp_mm\":%.1f,"
-        "\"aligned\":%s,\"angle_tol\":%.1f}",
+        "\"edge_px\":%.1f,\"aligned\":%s,\"angle_tol\":%.1f}",
         (unsigned)dt, avg.id, avg.hamming,
         (double)dev.phi_deg, (double)dev.psi_deg, (double)dev.phi_shape_deg,
         (double)dev.axial_mm, (double)dev.arc_mm, (double)dev.perp_mm,
+        (double)avg.edge_a,
         dev.aligned ? "true" : "false", (double)ALIGN_ANGLE_TOL);
     return httpd_resp_send(req, buf, n);
+}
+
+/* 清空滑动窗口, 强制下一次从零累计 ALIGN_FRAMES */
+static void reset_consensus_window(void) {
+    portENTER_CRITICAL(&s_res_mux);
+    s_win_count = 0;
+    s_consensus_ok = false;
+    s_have_raw = false;
+    strcpy(s_consensus_reason, "measuring");
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+    /* New once/ref starts clean: do not carry soft-hold across measurements. */
+    s_hold_valid = false;
+#endif
+    portEXIT_CRITICAL(&s_res_mux);
+}
+
+/* 等待后台共识 (租约需已激活); 超时返回 false */
+static bool wait_consensus(uint32_t timeout_ms, TagObservation *out, char *reason, size_t reason_sz) {
+    uint32_t w0 = millis();
+    bool got = false;
+    while ((millis() - w0) < timeout_ms) {
+        portENTER_CRITICAL(&s_res_mux);
+        got = s_consensus_ok;
+        if (got && out) *out = s_consensus_obs;
+        if (reason && reason_sz) {
+            strncpy(reason, s_consensus_reason, reason_sz - 1);
+            reason[reason_sz - 1] = '\0';
+        }
+        portEXIT_CRITICAL(&s_res_mux);
+        if (got) return true;
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    portENTER_CRITICAL(&s_res_mux);
+    if (reason && reason_sz) {
+        strncpy(reason, s_consensus_reason, reason_sz - 1);
+        reason[reason_sz - 1] = '\0';
+    }
+    if (out) *out = s_consensus_obs;
+    got = s_consensus_ok;
+    portEXIT_CRITICAL(&s_res_mux);
+    return got;
+}
+
+/* 把共识位姿编成 /align/get|/align/once 同款 JSON */
+static esp_err_t send_align_json(httpd_req_t *req, bool got, const TagObservation *avg,
+                                 const char *reason, uint32_t dt) {
+    char buf[384];
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    if (!got) {
+        snprintf(g_last_reason, sizeof(g_last_reason), "%s", reason ? reason : "fail");
+        TagObservation raw;
+        bool have_raw;
+        portENTER_CRITICAL(&s_res_mux);
+        raw = s_last_raw;
+        have_raw = s_have_raw;
+        portEXIT_CRITICAL(&s_res_mux);
+        int n = snprintf(buf, sizeof(buf),
+                         "{\"ok\":false,\"reason\":\"%s\",\"dt_ms\":%u,\"edge_px\":%.1f}",
+                         reason ? reason : "fail", (unsigned)dt,
+                         have_raw ? (double)raw.edge_a : 0.0);
+        return httpd_resp_send(req, buf, n);
+    }
+    Deviation dev;
+    if (!AlignMeasure_Compute(avg, &dev)) {
+        snprintf(g_last_reason, sizeof(g_last_reason), "compute_failed");
+        return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"compute_failed\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    g_last_dev = dev;
+    g_last_valid = true;
+    snprintf(g_last_reason, sizeof(g_last_reason), "ok");
+    int n = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"dt_ms\":%u,\"id\":%d,\"hamming\":%d,"
+        "\"phi_deg\":%.2f,\"psi_deg\":%.2f,\"phi_shape_deg\":%.2f,"
+        "\"axial_mm\":%.1f,\"arc_mm\":%.1f,\"perp_mm\":%.1f,"
+        "\"edge_px\":%.1f,\"aligned\":%s,\"angle_tol\":%.1f}",
+        (unsigned)dt, avg->id, avg->hamming,
+        (double)dev.phi_deg, (double)dev.psi_deg, (double)dev.phi_shape_deg,
+        (double)dev.axial_mm, (double)dev.arc_mm, (double)dev.perp_mm,
+        (double)avg->edge_a,
+        dev.aligned ? "true" : "false", (double)ALIGN_ANGLE_TOL);
+    return httpd_resp_send(req, buf, n);
+}
+
+/* ---- GET /align/once : 点测一次 (激活检测→等共识→释租) ---- */
+static esp_err_t handle_align_once(httpd_req_t *req) {
+    const AlignRefPose *ref = AlignMeasure_GetRef();
+    if (!ref->valid) {
+        snprintf(g_last_reason, sizeof(g_last_reason), "no_ref");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, "{\"ok\":false,\"reason\":\"no_ref\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    reset_consensus_window();
+    s_detect_active_until = millis() + 8000;  /* 足够 ALIGN_FRAMES=2 累计 */
+
+    TagObservation avg;
+    memset(&avg, 0, sizeof(avg));
+    char reason[32] = "timeout";
+    uint32_t t0 = millis();
+    bool got = wait_consensus(5000, &avg, reason, sizeof(reason));
+    uint32_t dt = millis() - t0;
+
+    /* 测完立刻释租, 让推流恢复流畅 */
+    s_detect_active_until = 0;
+
+    Stream_Log("once %s reason=%s dt=%ums", got ? "OK" : "FAIL", reason, (unsigned)dt);
+    return send_align_json(req, got, &avg, reason, dt);
 }
 
 /* ---- GET /align/ref (或 ?clear=1) ---- */
@@ -415,35 +574,14 @@ static esp_err_t handle_align_ref(httpd_req_t *req) {
         return httpd_resp_send(req, "{\"ok\":true,\"ref\":false}", HTTPD_RESP_USE_STRLEN);
     }
 
-    /* 激活后台检测, 轮询等待最多 800ms 拿到稳定共识 */
-    s_detect_active_until = millis() + 3000;
-    uint32_t w0 = millis();
-    bool got = false;
+    /* 点测记参考: 清空窗口→激活检测→等共识→释租 */
+    reset_consensus_window();
+    s_detect_active_until = millis() + 8000;
     TagObservation avg;
     memset(&avg, 0, sizeof(avg));
-    char reason[32] = "no_tag";
-
-    /* 记参考位是用户主动触发的一次性操作, 不该被 3 帧抖动卡死:
-     * 等 3s 拿稳定共识; 超时但已有单帧有效观测时, 直接用它记参考位。 */
-    TagObservation single;
-    bool has_single = false;
-    memset(&single, 0, sizeof(single));
-    while ((millis() - w0) < 3000) {
-        portENTER_CRITICAL(&s_res_mux);
-        got = s_consensus_ok;
-        avg = s_consensus_obs;
-        strncpy(reason, s_consensus_reason, sizeof(reason) - 1);
-        reason[sizeof(reason) - 1] = '\0';
-        if (!got && s_last_good_ok) { single = s_last_good; has_single = true; }
-        portEXIT_CRITICAL(&s_res_mux);
-        if (got) break;
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
-    if (!got && has_single) {
-        avg = single;
-        got = true;
-        strcpy(reason, "single");
-    }
+    char reason[32] = "timeout";
+    bool got = wait_consensus(5000, &avg, reason, sizeof(reason));
+    s_detect_active_until = 0;
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -476,7 +614,7 @@ static esp_err_t handle_align_status(httpd_req_t *req) {
         n = snprintf(buf, sizeof(buf),
             "ref: u=%.1f v=%.1f theta=%.2fdeg edge=%.1fpx\n"
             "last(%s): phi=%.2fdeg psi=%.2fdeg axial=%.1fmm arc=%.1fmm aligned=%d\n"
-            "cfg: tag=%.0fmm R_TAG=%.0fmm pipe_R=%.0fmm tol=%.1fdeg axial_tol=%.0fmm frames=%d\n",
+            "cfg: landmark=%.0fmm R_TAG=%.0fmm pipe_R=%.0fmm tol=%.1fdeg axial_tol=%.0fmm frames=%d\n",
             ref->u, ref->v, ref->theta * 180.0f / (float)M_PI, ref->edge_a,
             g_last_reason,
             g_last_valid ? (double)g_last_dev.phi_deg : 0.0,
@@ -484,14 +622,14 @@ static esp_err_t handle_align_status(httpd_req_t *req) {
             g_last_valid ? (double)g_last_dev.axial_mm : 0.0,
             g_last_valid ? (double)g_last_dev.arc_mm : 0.0,
             (g_last_valid && g_last_dev.aligned) ? 1 : 0,
-            (double)TAG_REAL_MM, (double)R_TAG_MM, (double)PIPE_RADIUS_MM,
+            (double)LANDMARK_MM, (double)R_TAG_MM, (double)PIPE_RADIUS_MM,
             (double)ALIGN_ANGLE_TOL, (double)ALIGN_AXIAL_TOL_MM, ALIGN_FRAMES);
     } else {
         n = snprintf(buf, sizeof(buf),
             "ref: none (last=%s)\n"
-            "cfg: tag=%.0fmm R_TAG=%.0fmm pipe_R=%.0fmm tol=%.1fdeg axial_tol=%.0fmm frames=%d\n",
+            "cfg: landmark=%.0fmm R_TAG=%.0fmm pipe_R=%.0fmm tol=%.1fdeg axial_tol=%.0fmm frames=%d\n",
             g_last_reason,
-            (double)TAG_REAL_MM, (double)R_TAG_MM, (double)PIPE_RADIUS_MM,
+            (double)LANDMARK_MM, (double)R_TAG_MM, (double)PIPE_RADIUS_MM,
             (double)ALIGN_ANGLE_TOL, (double)ALIGN_AXIAL_TOL_MM, ALIGN_FRAMES);
     }
     int k = snprintf(buf + n, sizeof(buf) - n,
@@ -513,17 +651,20 @@ static esp_err_t handle_align_status(httpd_req_t *req) {
 void AlignServer_Register(httpd_handle_t control_httpd) {
     if (!g_measure_lock) g_measure_lock = xSemaphoreCreateMutex();
     /* 后台检测任务: 栈 8KB, 优先级 2 (低于 httpd 的 5), 绑定 Core 0 */
-    xTaskCreatePinnedToCore(align_worker_task, "align_wk", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(align_worker_task, "align_wk", 16384, NULL, 2, NULL, 0);
 
     httpd_uri_t get_uri = {.uri = "/align/get", .method = HTTP_GET,
                            .handler = handle_align_get, .user_ctx = NULL};
+    httpd_uri_t once_uri = {.uri = "/align/once", .method = HTTP_GET,
+                            .handler = handle_align_once, .user_ctx = NULL};
     httpd_uri_t ref_uri = {.uri = "/align/ref", .method = HTTP_GET,
                            .handler = handle_align_ref, .user_ctx = NULL};
     httpd_uri_t status_uri = {.uri = "/align/status", .method = HTTP_GET,
                               .handler = handle_align_status, .user_ctx = NULL};
     if (!control_httpd) return;
     httpd_register_uri_handler(control_httpd, &get_uri);
+    httpd_register_uri_handler(control_httpd, &once_uri);
     httpd_register_uri_handler(control_httpd, &ref_uri);
     httpd_register_uri_handler(control_httpd, &status_uri);
-    Serial.println("[ALIGN] API ready: /align/ref /align/get /align/status (async worker)");
+    Serial.println("[ALIGN] API ready: /align/ref /align/get /align/once /align/status");
 }

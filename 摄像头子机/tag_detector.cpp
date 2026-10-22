@@ -21,7 +21,7 @@
 #endif
 
 #define DET_MAX_COMPS     4096   /* 连通域统计上限 (噪声场景碎域多, 需留余量) */
-#define DET_MAX_CANDS     8      /* 最多尝试解码的候选数 */
+#define DET_MAX_CANDS     24     /* 杂乱背景时面积大的块会占位, 多试几个 */
 
 typedef struct {
     int32_t area;
@@ -29,6 +29,9 @@ typedef struct {
     int64_t sx, sy, sxx, syy, sxy;
 } CompStat;
 
+/* 候选连通域: 4096 个 x 8B = 32KB, 必须放 PSRAM, 不能放栈上 */
+
+typedef struct { int id; int32_t area; } Cand;
 /* ================= 工作区 (按尺寸惰性分配复用) ================= */
 typedef struct {
     int      w, h;
@@ -38,6 +41,8 @@ typedef struct {
     uint16_t *parent;  /* 并查集 */
     CompStat *stats;   /* 暗域统计 */
     uint16_t (*wbbox)[4]; /* 白域包围盒 (填洞用) */
+    Cand     *cands;   /* 候选数组 (PSRAM) */
+    uint8_t  *half;    /* 半分辨率灰度 (连通域加速) */
 } Scratch;
 
 static Scratch g_sc;
@@ -49,45 +54,10 @@ static void *psram_malloc(size_t n) {
     return p;
 }
 
-/* 2x 双线性放大缓冲 (PSRAM, 惰性分配): 320x240 -> 640x480,
- * 让远处小 tag 的黑框在检测阶段获得双倍像素, 而不增加 JPEG 解码负担。 */
-static uint8_t *s_up = NULL;
-static int s_up_w = 0, s_up_h = 0;
-
-static const uint8_t *upscale2x(const uint8_t *src, int w, int h, int stride,
-                                int *out_w, int *out_h) {
-    const int W = w * 2, H = h * 2;
-    if (!s_up || s_up_w != W || s_up_h != H) {
-        free(s_up);
-        s_up = (uint8_t *)psram_malloc((size_t)W * H);
-        s_up_w = W; s_up_h = H;
-    }
-    if (!s_up) return NULL;
-    for (int y = 0; y < H; y++) {
-        int sy = y >> 1;
-        int sy1 = (sy + 1 < h) ? sy + 1 : sy;
-        int fy = (y & 1) ? 128 : 0;
-        const uint8_t *r0 = src + (size_t)sy * stride;
-        const uint8_t *r1 = src + (size_t)sy1 * stride;
-        uint8_t *dst = s_up + (size_t)y * W;
-        for (int x = 0; x < W; x++) {
-            int sx = x >> 1;
-            int sx1 = (sx + 1 < w) ? sx + 1 : sx;
-            int fx = (x & 1) ? 128 : 0;
-            int a = r0[sx], b = r0[sx1], c = r1[sx], d = r1[sx1];
-            int top = a * (256 - fx) + b * fx;
-            int bot = c * (256 - fx) + d * fx;
-            dst[x] = (uint8_t)((top * (256 - fy) + bot * fy) >> 16);
-        }
-    }
-    *out_w = W; *out_h = H;
-    return s_up;
-}
-
 static bool scratch_ensure(int w, int h) {
     if (g_sc.w == w && g_sc.h == h) return true;
     free(g_sc.ii); free(g_sc.bin); free(g_sc.lab); free(g_sc.parent);
-    free(g_sc.stats); free(g_sc.wbbox);
+    free(g_sc.stats); free(g_sc.wbbox); free(g_sc.cands); free(g_sc.half);
     memset(&g_sc, 0, sizeof(g_sc));
     g_sc.ii     = (uint32_t *)psram_malloc((size_t)(w + 1) * (h + 1) * 4);
     g_sc.bin    = (uint8_t *)psram_malloc((size_t)w * h);
@@ -95,10 +65,12 @@ static bool scratch_ensure(int w, int h) {
     g_sc.parent = (uint16_t *)psram_malloc((size_t)w * h * 2);
     g_sc.stats  = (CompStat *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(CompStat));
     g_sc.wbbox  = (uint16_t (*)[4])psram_malloc((size_t)DET_MAX_COMPS * 4 * 2);
+    g_sc.cands  = (Cand *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(Cand));
+    g_sc.half   = (uint8_t *)psram_malloc((size_t)w * h);
     if (!g_sc.ii || !g_sc.bin || !g_sc.lab || !g_sc.parent ||
-        !g_sc.stats || !g_sc.wbbox) {
+        !g_sc.stats || !g_sc.wbbox || !g_sc.cands || !g_sc.half) {
         free(g_sc.ii); free(g_sc.bin); free(g_sc.lab); free(g_sc.parent);
-        free(g_sc.stats); free(g_sc.wbbox);
+        free(g_sc.stats); free(g_sc.wbbox); free(g_sc.cands); free(g_sc.half);
         memset(&g_sc, 0, sizeof(g_sc));
         return false;
     }
@@ -167,6 +139,20 @@ static uint16_t uf_find(uint16_t *p, uint16_t a) {
  * 大片黑色的内部局部均值≈自身, 不会被判暗 -> 黑框被掏空成细带, 连通域断裂。
  * 处理: 对"白"做连通域标记, 不接触图像边界的白区一律判为洞 -> 填黑。
  * 效果: 标签变成实心黑方块 (对角点提取更稳), 解码仍直接采灰度原图, 不受影响。 */
+static void wbbox_union(uint16_t (*wbbox)[4], uint16_t dst, uint16_t src) {
+    if (wbbox[src][0] < wbbox[dst][0]) wbbox[dst][0] = wbbox[src][0];
+    if (wbbox[src][1] > wbbox[dst][1]) wbbox[dst][1] = wbbox[src][1];
+    if (wbbox[src][2] < wbbox[dst][2]) wbbox[dst][2] = wbbox[src][2];
+    if (wbbox[src][3] > wbbox[dst][3]) wbbox[dst][3] = wbbox[src][3];
+}
+
+static void wbbox_expand(uint16_t (*wbbox)[4], uint16_t id, int x, int y) {
+    if (x < wbbox[id][0]) wbbox[id][0] = (uint16_t)x;
+    if (x > wbbox[id][1]) wbbox[id][1] = (uint16_t)x;
+    if (y < wbbox[id][2]) wbbox[id][2] = (uint16_t)y;
+    if (y > wbbox[id][3]) wbbox[id][3] = (uint16_t)y;
+}
+
 static void fill_holes(int w, int h) {
     uint16_t *lab = g_sc.lab, *parent = g_sc.parent;
     uint16_t (*wbbox)[4] = g_sc.wbbox;
@@ -186,24 +172,31 @@ static void fill_holes(int w, int h) {
                 if (next >= DET_MAX_COMPS) { lrow[x] = 0; continue; }
                 m = next++;
                 parent[m] = m;
-                wbbox[m][0] = wbbox[m][1] = x;
-                wbbox[m][2] = wbbox[m][3] = y;
+                wbbox[m][0] = wbbox[m][1] = (uint16_t)x;
+                wbbox[m][2] = wbbox[m][3] = (uint16_t)y;
             } else {
                 m = uf_find(parent, m);
+                wbbox_expand(wbbox, m, x, y);
             }
             lrow[x] = m;
             if (x > 0 && lrow[x - 1] && lrow[x - 1] != m) {
                 uint16_t a = uf_find(parent, lrow[x - 1]);
-                if (a != m) parent[a] = m;
+                if (a != m) {
+                    parent[a] = m;
+                    wbbox_union(wbbox, m, a);
+                }
             }
             if (y > 0 && lup[x] && lup[x] != m) {
                 uint16_t a = uf_find(parent, lup[x]);
-                if (a != m) parent[a] = m;
+                if (a != m) {
+                    parent[a] = m;
+                    wbbox_union(wbbox, m, a);
+                }
             }
         }
     }
 
-    /* 不触边的白区 -> 填黑 (洞) */
+    /* 不触边的白区 -> 填黑 (洞): 须四边都不碰图像边界 */
     for (int y = 0; y < h; y++) {
         uint8_t *brow = g_sc.bin + (size_t)y * w;
         uint16_t *lrow = lab + (size_t)y * w;
@@ -213,8 +206,8 @@ static void fill_holes(int w, int h) {
             if (l == 0) continue;                    /* 未标注 = 背景 */
             uint16_t r = uf_find(parent, l);
             if (r >= DET_MAX_COMPS) continue;        /* 超上限按背景处理 */
-            if (wbbox[r][0] > 0 || wbbox[r][1] < w - 1 ||
-                wbbox[r][2] > 0 || wbbox[r][3] < h - 1) continue;
+            if (!(wbbox[r][0] > 0 && wbbox[r][1] < w - 1 &&
+                  wbbox[r][2] > 0 && wbbox[r][3] < h - 1)) continue;
             brow[x] = 1;
         }
     }
@@ -557,7 +550,7 @@ static void refine_corners(const uint8_t *im, int w, int h, int stride,
 }
 
 /* ================= 候选 -> 角点 -> 解码 ================= */
-typedef struct { int id; int32_t area; } Cand;
+
 
 static int cand_cmp(const void *a, const void *b) {
     return ((const Cand *)b)->area - ((const Cand *)a)->area;
@@ -611,34 +604,63 @@ bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
         diag->stage = 1;
     }
     if (!gray || w <= 0 || h <= 0) return false;
-    /* 320x240 输入先 2x 放大: 远处小 tag 黑框获得双倍像素,
-     * 解码仍是 320x240 (不增加 esp_jpeg_decode 负担)。 */
-    if (w <= 400 && h <= 300) {
-        int uw = 0, uh = 0;
-        const uint8_t *up = upscale2x(gray, w, h, stride, &uw, &uh);
-        if (up) { gray = up; w = uw; h = uh; stride = uw; }
-    }
-    if (!scratch_ensure(w, h)) return false;
 
-    threshold_adaptive(gray, w, h, stride);
-    fill_holes(w, h);
-    label_components(w, h);
+    /* Phase A1: 连通域强制全分辨率 (对标 quad_decimate=1); 角点精修/采码仍用原灰度 */
+    const int scale = 1;
+    const int cw = w / scale, ch = h / scale;
+    if (!scratch_ensure(cw, ch)) return false;
+
+    const uint8_t *cc_gray = gray;
+    int cc_stride = stride;
+    if (scale == 2) {
+        for (int y = 0; y < ch; y++) {
+            const uint8_t *r0 = gray + (size_t)(y * 2) * stride;
+            const uint8_t *r1 = gray + (size_t)(y * 2 + 1) * stride;
+            uint8_t *dst = g_sc.half + (size_t)y * cw;
+            for (int x = 0; x < cw; x++) {
+                int s = r0[x * 2] + r0[x * 2 + 1] + r1[x * 2] + r1[x * 2 + 1];
+                dst[x] = (uint8_t)(s >> 2);
+            }
+        }
+        cc_gray = g_sc.half;
+        cc_stride = cw;
+    }
+
+    threshold_adaptive(cc_gray, cw, ch, cc_stride);
+    fill_holes(cw, ch);
+    label_components(cw, ch);
     if (diag) diag->ncomps = g_ncomps;
     if (g_ncomps == 0) return false;
 
-    /* 按面积取前几个候选 */
-    static Cand *cands = NULL;
-    if (!cands) {
-        cands = (Cand *)psram_malloc((size_t)DET_MAX_COMPS * sizeof(Cand));
-        if (!cands) return false;
-    }
+    /* 先按方形/尺寸筛, 再按面积排序。杂乱场景里大黑块不能挤掉真正的标签。 */
+    Cand *cands = g_sc.cands;
+    if (!cands) return false;
     int ncand = 0;
     for (int i = 1; i < DET_MAX_COMPS && i < 65535; i++) {
-        if (g_sc.stats[i].area > 0) {
-            cands[ncand].id = i;
-            cands[ncand].area = g_sc.stats[i].area;
-            ncand++;
+        const CompStat *st = &g_sc.stats[i];
+        if (st->area <= 0) continue;
+        float bw = st->maxx - st->minx + 1, bh = st->maxy - st->miny + 1;
+        if (bw < 0.7f * DET_EDGE_PX_MIN || bh < 0.7f * DET_EDGE_PX_MIN) {
+            if (diag) diag->drop_small++;
+            continue;
         }
+        if (bw > 1.6f * DET_EDGE_PX_MAX || bh > 1.6f * DET_EDGE_PX_MAX) {
+            if (diag) diag->drop_large++;
+            continue;
+        }
+        double fill = (double)st->area / (bw * bh);
+        if (fill < 0.15) {
+            if (diag) diag->drop_fill++;
+            continue;
+        }
+        double ar = bw / bh;
+        if (ar < 0.4 || ar > 2.5) {
+            if (diag) diag->drop_aspect++;
+            continue;
+        }
+        cands[ncand].id = i;
+        cands[ncand].area = st->area;
+        ncand++;
     }
     if (ncand == 0) return false;
     qsort(cands, ncand, sizeof(Cand), cand_cmp);
@@ -678,8 +700,8 @@ bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
         }
         double fill = (double)st->area / (bw * bh);
         /* 下限 0.15: 环带形态(黑框+暗位连不齐)约 0.2+, 细碎轮廓线 <0.1;
-         * 上限 0.99: 填洞后是实心方块 (正对时 fill≈0.98) */
-        if (fill < 0.15 || fill > 0.99) {
+         * 填洞后轴对齐实心方块 fill 可达 1.0, 不再设上限 */
+        if (fill < 0.15) {
             if (diag) diag->drop_fill++;
             continue;
         }
@@ -692,7 +714,11 @@ bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
 
         float P[4][2];
         float centroid[2] = {(float)((double)st->sx / st->area), (float)((double)st->sy / st->area)};
-        if (!comp_extremes(st, cands[ci].id, w, h, P)) continue;
+        if (!comp_extremes(st, cands[ci].id, cw, ch, P)) continue;
+        if (scale == 2) {
+            for (int i = 0; i < 4; i++) { P[i][0] *= 2.0f; P[i][1] *= 2.0f; }
+            centroid[0] *= 2.0f; centroid[1] *= 2.0f;
+        }
 
         /* 角点按绕形心方位角排序, 得到一致环序 */
         float ang[4];
@@ -741,4 +767,611 @@ bool TagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
     if (diag) diag->stage = 0;
     *out = best;
     return true;
+}
+
+/* ================= 小车俯视双腰形孔 =================
+ * 通孔有深度: 孔心亮度随后面的东西/光照变, 不能当实心黑块。
+ * 做法: 估 PLA 灰度 → 车体=接近 PLA 的像素 → 填封闭空洞 → 空洞=孔
+ * (孔心比 PLA 亮或暗都行, 只要被塑料围住)。
+ * 中点 (u,v), 连线 theta, 孔心距 edge_a。 */
+#define CH_MAX_HOLES 32
+#define CH_MIN_AREA  10
+#define CH_MAX_AREA  8000
+
+static float s_lock_u = -1.0f, s_lock_v = -1.0f;
+static uint32_t s_lock_ms = 0;
+
+typedef struct {
+    float cx, cy, major, minor, axis, fill, aspect, len;
+    int32_t area;
+    int16_t minx, miny, maxx, maxy;
+} HoleCand;
+
+static void invert_bin(int w, int h) {
+    size_t n = (size_t)w * (size_t)h;
+    uint8_t *b = g_sc.bin;
+    for (size_t i = 0; i < n; i++) b[i] = (uint8_t)(1 - b[i]);
+}
+
+static float ang_udiff(float a, float b) {
+    float d = a - b;
+    while (d > (float)M_PI * 0.5f) d -= (float)M_PI;
+    while (d < -(float)M_PI * 0.5f) d += (float)M_PI;
+    return fabsf(d);
+}
+
+static void hole_geom(const CompStat *st, HoleCand *h) {
+    double n = (double)st->area;
+    double mx = st->sx / n, my = st->sy / n;
+    double cxx = st->sxx / n - mx * mx;
+    double cyy = st->syy / n - my * my;
+    double cxy = st->sxy / n - mx * my;
+    double tr = cxx + cyy;
+    double tmp = sqrt((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy);
+    double l1 = 0.5 * (tr + tmp);
+    double l2 = 0.5 * (tr - tmp);
+    if (l2 < 0) l2 = 0;
+    h->cx = (float)mx;
+    h->cy = (float)my;
+    h->major = 2.0f * sqrtf((float)l1 + 1e-6f);
+    h->minor = 2.0f * sqrtf((float)l2 + 1e-6f);
+    h->axis = 0.5f * (float)atan2(2.0 * cxy, cxx - cyy);
+    float bw = (float)(st->maxx - st->minx + 1);
+    float bh = (float)(st->maxy - st->miny + 1);
+    h->len = (bw > bh) ? bw : bh;
+    h->fill = (float)((double)st->area / (bw * bh));
+    h->aspect = (bw > bh) ? (bw / bh) : (bh / bw);
+    h->area = st->area;
+    h->minx = st->minx; h->maxx = st->maxx;
+    h->miny = st->miny; h->maxy = st->maxy;
+}
+
+static int collect_holes(int w, int h, HoleCand *hs, int maxn, TagDiag *diag) {
+    (void)w; (void)h;
+    int n = 0;
+    for (int i = 1; i < DET_MAX_COMPS; i++) {
+        const CompStat *st = &g_sc.stats[i];
+        if (st->area < CH_MIN_AREA) {
+            if (st->area > 0 && diag) diag->drop_small++;
+            continue;
+        }
+        if (st->area > CH_MAX_AREA) {
+            if (diag) diag->drop_large++;
+            continue;
+        }
+        float bw = (float)(st->maxx - st->minx + 1);
+        float bh = (float)(st->maxy - st->miny + 1);
+        float long_s = (bw > bh) ? bw : bh;
+        float short_s = (bw > bh) ? bh : bw;
+        if (long_s < 5.0f) {
+            if (diag) diag->drop_small++;
+            continue;
+        }
+        if (long_s > 160.0f) {
+            if (diag) diag->drop_large++;
+            continue;
+        }
+        double fill = (double)st->area / (bw * bh);
+        if (fill < 0.28 || fill > 0.94) {
+            if (diag) diag->drop_fill++;
+            continue;
+        }
+        double ar = (double)long_s / (short_s > 1.0f ? short_s : 1.0f);
+        if (ar < 1.25 || ar > 5.0) {
+            if (diag) diag->drop_aspect++;
+            continue;
+        }
+        if (n >= maxn) break;
+        hole_geom(st, &hs[n]);
+        n++;
+    }
+    return n;
+}
+
+static bool pair_holes(const HoleCand *hs, int n, int cw, int ch, float scale,
+                       int *bi, int *bj, float *bsc) {
+    *bi = *bj = -1;
+    *bsc = -1e9f;
+    const float max_align = 35.0f * (float)M_PI / 180.0f;
+    const float img_lim = 0.42f * (cw < ch ? (float)cw : (float)ch);
+    const bool have_lock = (s_lock_u >= 0.0f) && (millis() - s_lock_ms < 2000);
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            float ar = (hs[i].area > hs[j].area)
+                ? (float)hs[i].area / (float)hs[j].area
+                : (float)hs[j].area / (float)hs[i].area;
+            if (ar > 1.8f) continue;
+            float dx = hs[j].cx - hs[i].cx;
+            float dy = hs[j].cy - hs[i].cy;
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (dist < 6.0f || dist > img_lim) continue;
+            float mean_len = 0.5f * (hs[i].len + hs[j].len);
+            if (mean_len < 1.0f) continue;
+            float ratio = dist / mean_len;
+            /* 孔长约 20mm、心距约 45mm -> ratio ~ 2.0~2.5 */
+            if (ratio < 1.35f || ratio > 3.6f) continue;
+            float pair_th = atan2f(dy, dx);
+            if (ang_udiff(hs[i].axis, pair_th) > max_align) continue;
+            if (ang_udiff(hs[j].axis, pair_th) > max_align) continue;
+            float sc = (1.8f - ar) * 4.0f
+                + (1.0f - fabsf(ratio - 2.2f)) * 2.0f
+                + 40.0f / (dist + 8.0f);
+            if (have_lock) {
+                float mx = 0.5f * (hs[i].cx + hs[j].cx) * scale;
+                float my = 0.5f * (hs[i].cy + hs[j].cy) * scale;
+                float du = mx - s_lock_u, dv = my - s_lock_v;
+                sc += 6.0f / (1.0f + sqrtf(du * du + dv * dv) / 30.0f);
+            }
+            if (sc > *bsc) { *bsc = sc; *bi = i; *bj = j; }
+        }
+    }
+    return *bi >= 0;
+}
+
+static float gray_at(const uint8_t *gray, int w, int h, int stride, float x, float y) {
+    int ix = (int)(x + 0.5f), iy = (int)(y + 0.5f);
+    if (ix < 0 || iy < 0 || ix >= w || iy >= h) return -1.0f;
+    return (float)gray[(size_t)iy * stride + ix];
+}
+
+/* 孔外一圈 PLA 的灰度, 用来认车体而不是桌面 */
+static float sample_pla(const uint8_t *gray, int w, int h, int stride,
+                        const HoleCand *a, const HoleCand *b, float scale) {
+    float sum = 0;
+    int n = 0;
+    const HoleCand *hs[2] = {a, b};
+    const float dir[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{0.7f,0.7f},{-0.7f,0.7f},{0.7f,-0.7f},{-0.7f,-0.7f}};
+    for (int k = 0; k < 2; k++) {
+        float r = (hs[k]->minor * 0.9f + 3.0f) * scale;
+        float cx = hs[k]->cx * scale, cy = hs[k]->cy * scale;
+        for (int d = 0; d < 8; d++) {
+            float g = gray_at(gray, w, h, stride, cx + dir[d][0] * r, cy + dir[d][1] * r);
+            if (g >= 0) { sum += g; n++; }
+        }
+    }
+    return (n > 0) ? (sum / n) : 128.0f;
+}
+
+static float bar_body(const uint8_t *gray, int w, int h, int stride,
+                      float cx, float cy, float px, float py, float pla, float scan) {
+    int hits = 0, n = (int)(scan + 0.5f);
+    if (n < 6) n = 6;
+    for (int t = -n; t <= n; t++) {
+        float g = gray_at(gray, w, h, stride, cx + px * t, cy + py * t);
+        if (g >= 0 && fabsf(g - pla) < 38.0f) hits++;
+    }
+    return (float)hits;
+}
+
+static void fill_obs_from_pair(const HoleCand *a, const HoleCand *b,
+                               float scale, const uint8_t *gray, int w, int h, int stride,
+                               TagObservation *out) {
+    float cx0 = a->cx * scale, cy0 = a->cy * scale;
+    float cx1 = b->cx * scale, cy1 = b->cy * scale;
+    float mx = 0.5f * (cx0 + cx1), my = 0.5f * (cy0 + cy1);
+    float dx = cx1 - cx0, dy = cy1 - cy0;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 1.0f) dist = 1.0f;
+    float ux = dx / dist, uy = dy / dist;
+    float px = -uy, py = ux;
+
+    /* 180°: 车头有两个耳, 比管端宽。在双孔外侧各扫一条垂线, 更像 PLA 灰度的那边是头。 */
+    float pla = sample_pla(gray, w, h, stride, a, b, scale);
+    float reach0 = (0.75f * a->len + 4.0f) * scale;
+    float reach1 = (0.75f * b->len + 4.0f) * scale;
+    float scan = dist * 0.45f;
+    float w0 = bar_body(gray, w, h, stride, cx0 - ux * reach0, cy0 - uy * reach0, px, py, pla, scan);
+    float w1 = bar_body(gray, w, h, stride, cx1 + ux * reach1, cy1 + uy * reach1, px, py, pla, scan);
+    if (w0 > w1 + 3.0f) {
+        ux = -ux; uy = -uy;
+        px = -px; py = -py;
+    }
+
+    float hw = 0.35f * 0.5f * (a->minor + b->minor) * scale + 4.0f;
+    float hl = 0.5f * dist + 0.25f * (a->len + b->len) * scale;
+    out->ok = true;
+    out->id = 0;
+    out->hamming = 0;
+    out->u = mx;
+    out->v = my;
+    out->theta = atan2f(uy, ux);
+    out->edge_a = dist;
+    out->edge_p = dist;
+    out->contrast = 40.0f;
+    out->margin = 10.0f;
+    out->corners[0][0] = mx - ux * hl - px * hw; out->corners[0][1] = my - uy * hl - py * hw;
+    out->corners[1][0] = mx + ux * hl - px * hw; out->corners[1][1] = my + uy * hl - py * hw;
+    out->corners[2][0] = mx + ux * hl + px * hw; out->corners[2][1] = my + uy * hl + py * hw;
+    out->corners[3][0] = mx - ux * hl + px * hw; out->corners[3][1] = my - uy * hl + py * hw;
+
+    s_lock_u = mx;
+    s_lock_v = my;
+    s_lock_ms = millis();
+}
+
+/* 通孔: 孔心(后面的东西)和孔边(PLA)灰度差要够, 亮暗方向不限 */
+static int keep_depth_holes(HoleCand *hs, int n, const uint8_t *im, int w, int h, int stride) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        float cx = hs[i].cx, cy = hs[i].cy;
+        float gin = 0;
+        int ni = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                float g = gray_at(im, w, h, stride, cx + dx, cy + dy);
+                if (g >= 0) { gin += g; ni++; }
+            }
+        }
+        if (ni) gin /= (float)ni;
+        float cax = cosf(hs[i].axis), say = sinf(hs[i].axis);
+        float px = -say, py = cax;
+        float r = hs[i].minor * 0.85f + 2.5f;
+        float rim = 0;
+        int nr = 0;
+        float dir[4][2] = {{cax, say}, {-cax, -say}, {px, py}, {-px, -py}};
+        for (int k = 0; k < 4; k++) {
+            float g = gray_at(im, w, h, stride, cx + dir[k][0] * r, cy + dir[k][1] * r);
+            if (g >= 0) { rim += g; nr++; }
+        }
+        if (nr) rim /= (float)nr;
+        if (fabsf(gin - rim) >= 10.0f) hs[m++] = hs[i];
+    }
+    return (m >= 2) ? m : n;
+}
+
+bool ChassisDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                              TagObservation *out, TagDiag *diag) {
+    memset(out, 0, sizeof(*out));
+    out->ok = false;
+    if (diag) {
+        memset(diag, 0, sizeof(*diag));
+        diag->best_hamming = 255;
+        diag->stage = 1;
+    }
+    if (!gray || w <= 0 || h <= 0) return false;
+
+    const int scale = (w >= 640 && h >= 480) ? 2 : 1;
+    const int cw = w / scale, ch = h / scale;
+    if (!scratch_ensure(cw, ch)) return false;
+
+    const uint8_t *cc_gray = gray;
+    int cc_stride = stride;
+    if (scale == 2) {
+        for (int y = 0; y < ch; y++) {
+            const uint8_t *r0 = gray + (size_t)(y * 2) * stride;
+            const uint8_t *r1 = gray + (size_t)(y * 2 + 1) * stride;
+            uint8_t *dst = g_sc.half + (size_t)y * cw;
+            for (int x = 0; x < cw; x++) {
+                int s = r0[x * 2] + r0[x * 2 + 1] + r1[x * 2] + r1[x * 2 + 1];
+                dst[x] = (uint8_t)(s >> 2);
+            }
+        }
+        cc_gray = g_sc.half;
+        cc_stride = cw;
+    }
+
+    HoleCand hs[CH_MAX_HOLES];
+    HoleCand best_a, best_b;
+    float best_sc = -1e9f;
+    int best_n = 0;
+    bool got = false;
+
+    /* 画面中心直方图估 PLA 灰。通孔内部不管亮暗, 只要跟塑料差一截、又被围住。 */
+    int hist[32];
+    memset(hist, 0, sizeof(hist));
+    int x0 = cw / 5, x1 = cw - cw / 5, y0 = ch / 5, y1 = ch - ch / 5;
+    for (int y = y0; y < y1; y++) {
+        const uint8_t *row = cc_gray + (size_t)y * cc_stride;
+        for (int x = x0; x < x1; x++) hist[row[x] >> 3]++;
+    }
+    int peak = 12, peakn = 0;
+    for (int b = 5; b <= 28; b++) {
+        if (hist[b] > peakn) { peakn = hist[b]; peak = b; }
+    }
+    const float pla = (float)(peak * 8 + 4);
+    const float pla_tol = 36.0f;
+    uint8_t *bin = g_sc.bin;
+    for (int y = 0; y < ch; y++) {
+        const uint8_t *row = cc_gray + (size_t)y * cc_stride;
+        uint8_t *brow = bin + (size_t)y * cw;
+        for (int x = 0; x < cw; x++) {
+            float g = (float)row[x];
+            brow[x] = (fabsf(g - pla) <= pla_tol) ? 1 : 0;
+        }
+    }
+    /* 把车体 mask 暂存在积分图前 w*h 格 (fill_holes 不用 ii) */
+    {
+        uint32_t *stash = g_sc.ii;
+        size_t n = (size_t)cw * (size_t)ch;
+        for (size_t i = 0; i < n; i++) stash[i] = bin[i];
+    }
+    fill_holes(cw, ch);
+    {
+        uint32_t *stash = g_sc.ii;
+        size_t n = (size_t)cw * (size_t)ch;
+        for (size_t i = 0; i < n; i++)
+            bin[i] = (bin[i] && stash[i] == 0) ? 1 : 0;
+    }
+    label_components(cw, ch);
+    if (diag) diag->ncomps = g_ncomps;
+    {
+        int n = collect_holes(cw, ch, hs, CH_MAX_HOLES, diag);
+        n = keep_depth_holes(hs, n, cc_gray, cw, ch, cc_stride);
+        best_n = n;
+        if (diag) diag->decode_tried = n;
+        int bi = -1, bj = -1;
+        float sc = -1e9f;
+        if (n >= 2 && pair_holes(hs, n, cw, ch, (float)scale, &bi, &bj, &sc)) {
+            best_sc = sc;
+            best_a = hs[bi];
+            best_b = hs[bj];
+            got = true;
+        }
+    }
+
+    /* 车体分割失败时, 暗/亮都试, 并先填封闭环, 环心亮暗无所谓 */
+    if (!got) {
+        threshold_adaptive(cc_gray, cw, ch, cc_stride);
+        for (int pol = 0; pol < 2; pol++) {
+            if (pol == 1) invert_bin(cw, ch);
+            fill_holes(cw, ch);
+            label_components(cw, ch);
+            if (diag) diag->ncomps = g_ncomps;
+            int n = collect_holes(cw, ch, hs, CH_MAX_HOLES, diag);
+            n = keep_depth_holes(hs, n, cc_gray, cw, ch, cc_stride);
+            if (n > best_n) best_n = n;
+            if (diag) diag->decode_tried += n;
+            int bi = -1, bj = -1;
+            float sc = -1e9f;
+            if (n >= 2 && pair_holes(hs, n, cw, ch, (float)scale, &bi, &bj, &sc) && sc > best_sc) {
+                best_sc = sc;
+                best_a = hs[bi];
+                best_b = hs[bj];
+                got = true;
+            }
+        }
+    }
+    if (diag) diag->ncand = best_n;
+    if (!got) {
+        if (diag) diag->stage = (best_n > 0) ? 3 : 2;
+        return false;
+    }
+
+    if (diag) {
+        int minx = best_a.minx < best_b.minx ? best_a.minx : best_b.minx;
+        int miny = best_a.miny < best_b.miny ? best_a.miny : best_b.miny;
+        int maxx = best_a.maxx > best_b.maxx ? best_a.maxx : best_b.maxx;
+        int maxy = best_a.maxy > best_b.maxy ? best_a.maxy : best_b.maxy;
+        diag->cand_bbox[0] = minx * scale;
+        diag->cand_bbox[1] = miny * scale;
+        diag->cand_bbox[2] = (maxx - minx + 1) * scale;
+        diag->cand_bbox[3] = (maxy - miny + 1) * scale;
+        diag->cand_area = (best_a.area + best_b.area) * scale * scale;
+        diag->cand_fill = 0.5f * (best_a.fill + best_b.fill);
+        diag->stage = 0;
+        diag->best_hamming = 0;
+        diag->best_contrast = best_sc;
+    }
+    fill_obs_from_pair(&best_a, &best_b, (float)scale, gray, w, h, stride, out);
+    return true;
+}
+
+
+/* ================= 双码融合 (两孔位各一枚 tag36h11) =================
+ * 复用单码连通域/解码流水线, 但不早停: 扫完全部候选, 收集 TAG_ID_A/B。
+ * 融合: 中点 (u,v), 小ID->大ID 连线角 theta, 中心距 edge_a (= edge_p)。
+ */
+static void fuse_dual_obs(const TagObservation *a, const TagObservation *b,
+                          TagObservation *out) {
+    const TagObservation *lo = (a->id <= b->id) ? a : b;
+    const TagObservation *hi = (a->id <= b->id) ? b : a;
+    float dx = hi->u - lo->u, dy = hi->v - lo->v;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 1.0f) dist = 1.0f;
+    float ux = dx / dist, uy = dy / dist;
+    float px = -uy, py = ux;
+    float half_w = 0.25f * (lo->edge_a + hi->edge_a);
+    if (half_w < 4.0f) half_w = 4.0f;
+    float half_l = 0.5f * dist;
+
+    memset(out, 0, sizeof(*out));
+    out->ok = true;
+    out->id = lo->id;
+    out->hamming = lo->hamming + hi->hamming;
+    out->u = 0.5f * (lo->u + hi->u);
+    out->v = 0.5f * (lo->v + hi->v);
+    out->theta = atan2f(dy, dx);
+    out->edge_a = dist;
+    out->edge_p = dist;   /* 双码不做边长收缩, phi_shape~=0 */
+    out->contrast = 0.5f * (lo->contrast + hi->contrast);
+    out->margin = 0.5f * (lo->margin + hi->margin);
+    out->corners[0][0] = out->u - ux * half_l - px * half_w;
+    out->corners[0][1] = out->v - uy * half_l - py * half_w;
+    out->corners[1][0] = out->u + ux * half_l - px * half_w;
+    out->corners[1][1] = out->v + uy * half_l - py * half_w;
+    out->corners[2][0] = out->u + ux * half_l + px * half_w;
+    out->corners[2][1] = out->v + uy * half_l + py * half_w;
+    out->corners[3][0] = out->u - ux * half_l + px * half_w;
+    out->corners[3][1] = out->v - uy * half_l + py * half_w;
+}
+
+bool DualTagDetector_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                              TagObservation *out, TagDiag *diag) {
+    memset(out, 0, sizeof(*out));
+    out->ok = false;
+    if (diag) {
+        memset(diag, 0, sizeof(*diag));
+        diag->best_hamming = 255;
+        diag->stage = 1;
+        diag->tags_found = 0;
+        diag->found_id_a = -1;
+        diag->found_id_b = -1;
+    }
+    if (!gray || w <= 0 || h <= 0) return false;
+    if (TAG_ID_A == TAG_ID_B) return false;
+
+    /* Phase A1: 连通域强制全分辨率; 角点精修/采码仍用原灰度 */
+    const int scale = 1;
+    const int cw = w / scale, ch = h / scale;
+    if (!scratch_ensure(cw, ch)) return false;
+
+    const uint8_t *cc_gray = gray;
+    int cc_stride = stride;
+    if (scale == 2) {
+        for (int y = 0; y < ch; y++) {
+            const uint8_t *r0 = gray + (size_t)(y * 2) * stride;
+            const uint8_t *r1 = gray + (size_t)(y * 2 + 1) * stride;
+            uint8_t *dst = g_sc.half + (size_t)y * cw;
+            for (int x = 0; x < cw; x++) {
+                int s = r0[x * 2] + r0[x * 2 + 1] + r1[x * 2] + r1[x * 2 + 1];
+                dst[x] = (uint8_t)(s >> 2);
+            }
+        }
+        cc_gray = g_sc.half;
+        cc_stride = cw;
+    }
+
+    threshold_adaptive(cc_gray, cw, ch, cc_stride);
+    fill_holes(cw, ch);
+    label_components(cw, ch);
+    if (diag) diag->ncomps = g_ncomps;
+    if (g_ncomps == 0) return false;
+
+    Cand *cands = g_sc.cands;
+    if (!cands) return false;
+    int ncand = 0;
+    for (int i = 1; i < DET_MAX_COMPS && i < 65535; i++) {
+        const CompStat *st = &g_sc.stats[i];
+        if (st->area <= 0) continue;
+        float bw = st->maxx - st->minx + 1, bh = st->maxy - st->miny + 1;
+        if (bw < 0.7f * DET_EDGE_PX_MIN || bh < 0.7f * DET_EDGE_PX_MIN) {
+            if (diag) diag->drop_small++;
+            continue;
+        }
+        if (bw > 1.6f * DET_EDGE_PX_MAX || bh > 1.6f * DET_EDGE_PX_MAX) {
+            if (diag) diag->drop_large++;
+            continue;
+        }
+        double fill = (double)st->area / (bw * bh);
+        if (fill < 0.15) { if (diag) diag->drop_fill++; continue; }
+        double ar = bw / bh;
+        if (ar < 0.4 || ar > 2.5) { if (diag) diag->drop_aspect++; continue; }
+        cands[ncand].id = i;
+        cands[ncand].area = st->area;
+        ncand++;
+    }
+    if (ncand == 0) return false;
+    qsort(cands, ncand, sizeof(Cand), cand_cmp);
+    if (diag) {
+        diag->ncand = ncand;
+        const CompStat *top = &g_sc.stats[cands[0].id];
+        diag->cand_bbox[0] = top->minx;
+        diag->cand_bbox[1] = top->miny;
+        diag->cand_bbox[2] = top->maxx - top->minx + 1;
+        diag->cand_bbox[3] = top->maxy - top->miny + 1;
+        diag->cand_area = (int)top->area;
+        int bw0 = top->maxx - top->minx + 1, bh0 = top->maxy - top->miny + 1;
+        diag->cand_fill = (bw0 > 0 && bh0 > 0) ? (float)top->area / (float)(bw0 * bh0) : 0.0f;
+        diag->stage = 2;
+    }
+    if (ncand > DET_MAX_CANDS) ncand = DET_MAX_CANDS;
+
+    TagObservation got_a, got_b;
+    bool have_a = false, have_b = false;
+    memset(&got_a, 0, sizeof(got_a));
+    memset(&got_b, 0, sizeof(got_b));
+
+    for (int ci = 0; ci < ncand; ci++) {
+        const CompStat *st = &g_sc.stats[cands[ci].id];
+        float bw = st->maxx - st->minx + 1, bh = st->maxy - st->miny + 1;
+        if (bw < 0.7f * DET_EDGE_PX_MIN || bh < 0.7f * DET_EDGE_PX_MIN) continue;
+        if (bw > 1.6f * DET_EDGE_PX_MAX || bh > 1.6f * DET_EDGE_PX_MAX) continue;
+        double fill = (double)st->area / (bw * bh);
+        if (fill < 0.15) continue;
+        double ar = bw / bh;
+        if (ar < 0.4 || ar > 2.5) continue;
+        if (diag) diag->decode_tried++;
+
+        float P[4][2];
+        float centroid[2] = {(float)((double)st->sx / st->area),
+                             (float)((double)st->sy / st->area)};
+        if (!comp_extremes(st, cands[ci].id, cw, ch, P)) continue;
+        if (scale == 2) {
+            for (int i = 0; i < 4; i++) { P[i][0] *= 2.0f; P[i][1] *= 2.0f; }
+            centroid[0] *= 2.0f; centroid[1] *= 2.0f;
+        }
+
+        float ang[4];
+        for (int i = 0; i < 4; i++)
+            ang[i] = atan2f(P[i][1] - centroid[1], P[i][0] - centroid[0]);
+        for (int i = 0; i < 3; i++)
+            for (int j = i + 1; j < 4; j++)
+                if (ang[j] < ang[i]) {
+                    float t = ang[i]; ang[i] = ang[j]; ang[j] = t;
+                    float tmp[2] = {P[i][0], P[i][1]};
+                    P[i][0] = P[j][0]; P[i][1] = P[j][1];
+                    P[j][0] = tmp[0]; P[j][1] = tmp[1];
+                }
+
+        float R[4][2];
+        refine_corners(gray, w, h, stride, P, centroid, R);
+
+        const float *base[2][4] = {
+            {R[0], R[1], R[2], R[3]},
+            {R[0], R[3], R[2], R[1]},
+        };
+        TagObservation best_o;
+        int best_h = 255;
+        memset(&best_o, 0, sizeof(best_o));
+        for (int ori = 0; ori < 2; ori++) {
+            for (int r = 0; r < 4; r++) {
+                float A[4][2];
+                for (int i = 0; i < 4; i++) {
+                    const float *src = base[ori][(r + i) % 4];
+                    A[i][0] = src[0]; A[i][1] = src[1];
+                }
+                TagObservation o;
+                int ham = decode_attempt(gray, w, h, stride, A, &o);
+                if (diag && ham < diag->best_hamming) {
+                    diag->best_hamming = ham;
+                    diag->best_contrast = o.contrast;
+                    diag->best_margin = o.margin;
+                }
+                if (ham < best_h) { best_h = ham; best_o = o; }
+            }
+        }
+        if (best_h > DET_MAX_HAMMING) continue;
+
+        if (best_o.id == TAG_ID_A) {
+            if (!have_a || best_h < got_a.hamming) { got_a = best_o; have_a = true; }
+        } else if (best_o.id == TAG_ID_B) {
+            if (!have_b || best_h < got_b.hamming) { got_b = best_o; have_b = true; }
+        }
+        if (have_a && have_b) break;
+    }
+
+    int nfound = (have_a ? 1 : 0) + (have_b ? 1 : 0);
+    if (diag) {
+        diag->tags_found = nfound;
+        diag->found_id_a = have_a ? TAG_ID_A : -1;
+        diag->found_id_b = have_b ? TAG_ID_B : -1;
+    }
+    if (nfound < 2) {
+        if (diag) diag->stage = (diag->decode_tried > 0) ? 3 : 2;
+        return false;
+    }
+    if (diag) diag->stage = 0;
+    fuse_dual_obs(&got_a, &got_b, out);
+    return true;
+}
+
+bool Landmark_DetectEx(const uint8_t *gray, int w, int h, int stride,
+                       TagObservation *out, TagDiag *diag) {
+#if LANDMARK_MODE == LANDMARK_DUAL_TAG
+    return DualTagDetector_DetectEx(gray, w, h, stride, out, diag);
+#elif LANDMARK_MODE == LANDMARK_CHASSIS
+    return ChassisDetector_DetectEx(gray, w, h, stride, out, diag);
+#else
+    return TagDetector_DetectEx(gray, w, h, stride, out, diag);
+#endif
 }

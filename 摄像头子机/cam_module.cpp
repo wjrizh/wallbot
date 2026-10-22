@@ -122,8 +122,7 @@ bool Cam_EnterDetectMode(void) {
     portEXIT_CRITICAL(&s_mode_mux);
     if (!need_switch) return true;
 
-    /* 不再切 framesize: 分辨率固定 VGA, 检测侧靠解码缩放得到 320x240。
-     * 这里只是把"当前有检测使用者"的状态记下来, 供诊断页展示。 */
+    /* 不再切 framesize: 分辨率固定 VGA。检测侧 640x480 解码, 连通域半分辨率。 */
     Stream_Log("detect mode ON (vga fixed)");
     return true;
 }
