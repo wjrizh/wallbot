@@ -959,8 +959,9 @@ uint32_t Flash_ReadNUM[2] = {0};
  * 每个子动作: 轮速PID慢速 + 编码器里程计计数到量即停 + 超时 + 每10ms轮询中止
  * 返回: 0=完成 1=被中止(STOP/遥控) 2=超时/打滑 */
 #define ADJ_PI              3.14159265f
-#define ADJ_SPEED_REV       12.0f    /* 纠偏直行速度(电机轴转/s), 轮面 12*15=180mm/s.
-                                     原 80 时轮面 1200mm/s, 几十mm 的目标 40ms 就跑完, 肉眼只见抖一下 */
+#define ADJ_SPEED_REV       30.0f    /* 纠偏直行速度(电机轴转/s), 轮面 30*15=450mm/s.
+                                     v=12 时 P 项仅 18*12=216(占空比 5%), 低于静摩擦死区,
+                                     实测要等积分爬 2.2s 才起步, 起步后又猛冲到 98% */
 #define ADJ_SPIN_SPEED_REV  40.0f    /* 自旋专用速度: arc 通常只有 20mm 量级, 用 12 时占空比仅 5%,
                                      PID 积分来不及建立, 实测 B 轮 2s 内只走 -2mm */
 #define ADJ_MM_PER_MOTORREV 15.0f    /* ⚠️占位待标定: 里程计每"电机转"对应轮面行走毫米
@@ -974,8 +975,9 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_TOL_PHI         0.5f     /* 死区(deg) */
 #define ADJ_TOL_PSI         0.5f
 #define ADJ_TOL_AX          2.0f     /* 死区(mm), 以内交给夹爪容差 */
-#define ADJ_MAX_PHI         10.0f    /* 单次限幅(deg), 超限钳位, 视觉下一轮再补 */
-#define ADJ_MAX_PSI         10.0f
+#define ADJ_MAX_PHI         45.0f    /* 单次限幅(deg). 原 10 把输入 50 砍成 10,
+                                     弧长只剩 52mm 而非 262mm, 用户感觉"给多大都动得微小" */
+#define ADJ_MAX_PSI         45.0f
 #define ADJ_MAX_AX          30.0f    /* 单次限幅(mm) */
 #define ADJ_SETTLE_MS       150      /* 段间刹车稳定等待 */
 #define ADJ_DEMO_GAIN       1.0f     /* 放大倍数. 迭代纠偏要求面板能按实测里程扣减剩余偏差,
@@ -988,6 +990,9 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_ST_MOVE         3
 #define ADJ_ST_SETTLE       4
 #define ADJ_TEL_PERIOD_MS   500u     /* 运动遥测周期(ms) */
+#define ADJ_PRELOAD_I       1200.0f  /* 段起始预充 PID 积分. 从 0 爬要 2.2s 才越过静摩擦死区,
+                                        期间轮子完全不动, 越过死区又猛冲过冲.
+                                        预充后起步占空比约 (1200+540)/4199 = 41% */
 #define ADJ_SPEED_REV_SLOW  3.0f     /* 测试用慢速(电机转/s), 便于肉眼观察 */
 #define ADJ_TEST_PHI        5.0f     /* 自检演示值(配合占位常数观察动作方向) */
 #define ADJ_TEST_PSI        (-3.0f)
@@ -1022,6 +1027,11 @@ static uint8_t Adj_Settle(void){
   }
   return 0;
 }
+/* 段起始预充两轮 PID 积分, 跳过静摩擦死区的爬升期 */
+static void Adj_PreloadIntegral(void){
+  err_MA = ADJ_PRELOAD_I;
+  err_MB = ADJ_PRELOAD_I;
+}
 /* 直行 dist_mm: >0=下降方向(A CH1/B CH4) <0=上升方向(A CH2/B CH3)
  * 返回 0=完成 1=中止 2=超时/打滑 */
 static uint8_t Adj_Move(float dist_mm){
@@ -1033,6 +1043,7 @@ static uint8_t Adj_Move(float dist_mm){
   uint32_t t0 = HAL_GetTick();
   if(target < 0.5f) return 0;
   Adj_OdomStart(&od);
+  Adj_PreloadIntegral();
   {
     uint32_t t_tel = 0;
     int8_t   dir = (dist_mm > 0) ? 1 : -1;
@@ -1099,6 +1110,7 @@ static uint8_t Adj_Spin(float theta_deg){
   uint32_t t0 = HAL_GetTick();
   if(arc < 0.5f) return 0;
   Adj_OdomStart(&od);
+  Adj_PreloadIntegral();
   {
     uint32_t t_tel = 0;
     int8_t   dir = (theta_deg * (float)ADJ_SPIN_SIGN > 0) ? 1 : -1;
