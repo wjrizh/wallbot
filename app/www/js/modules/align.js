@@ -284,7 +284,19 @@
   };
 
   AlignModule.prototype._sendAdj = function () {
+    /* 母机 TM_IDLE 会直接丢弃 ADJ 帧, 且不回 DONE, App 会永远显示"执行中".
+       只允许在 state=3(TM_READY) 下发 */
+    var st = this._testState.state;
+    if (st !== 3) {
+      this._log("子机未就绪 (state=" + st + "), 请先点「开始测试」并等待 TSTB", true);
+      if (st === 0) this._log("提示: 先点左侧「开始测试」按钮", true);
+      return;
+    }
     var phi = this._num("phi"), psi = this._num("psi"), ax = this._num("ax");
+    if (phi === 0 && psi === 0 && ax === 0) {
+      this._log("三个偏差全为 0, 无需纠偏", true);
+      return;
+    }
     if (this._iter.on) {
       this._iter.phi = phi; this._iter.psi = psi; this._iter.ax = ax;
       this._iter.n = 0; this._iter.active = true;
@@ -351,6 +363,11 @@
     if (this._stateEl) this._stateEl.textContent = STATE_TEXT[s.state] || ("状态" + s.state);
     if (this._roundEl) {
       this._roundEl.textContent = s.round + " / " + (s.lastRc ? RC_TEXT[s.lastRc] : "--");
+    }
+    if (s.state === 3 && prev === 0) this._log("子机就绪, 可以发送模拟偏差");
+    if (s.state === 0 && this._iter.active) {
+      this._iter.active = false;
+      this._log("测试已退出, 迭代中止", true);
     }
     if (s.round !== prev) {
       this._log("第 " + s.round + " 轮完成");
