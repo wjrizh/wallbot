@@ -140,7 +140,7 @@ static void doPing() {
   }
 }
 
-/* ===== 视觉纠偏测试 (虚拟数据, 不驱动真电机) ===== */
+/* ===== 视觉纠偏测试 (驱动真电机, 必须接电池) ===== */
 
 /* 全过程 trace, 网页显示 */
 static char s_trace[1400] = {0};
@@ -251,6 +251,9 @@ static void alignTick(void) {
       snprintf(s_telemLast, sizeof(s_telemLast),
                "stage=%u dir=%d a=%d b=%d tgt=%d pct=%u rc=%u",
                rx[1], dir, a_mm, b_mm, target, rx[9], rx[10]);
+    } else if (rx[0] == 'D' && rx[1] == ',') {
+      rx[31] = 0;
+      trace("%s", (const char*)rx);
     }
   }
 
@@ -300,7 +303,7 @@ button:active{background:#0060df}
 <button id="btn">发送一次 PING</button>
 <button id="btn10" style="background:#30d158">连发 10 次</button>
 
-<h2 style="margin-top:18px">视觉纠偏测试 (虚拟数据)</h2>
+<h2 style="margin-top:18px">视觉纠偏测试 (真电机，必须接电池)</h2>
 <div class="card">
   <div class="row"><span class="k">状态</span><span class="v" id="aSt">IDLE</span></div>
   <div class="row"><span class="k">已收遥测帧</span><span class="v" id="aFn">0</span></div>
@@ -314,6 +317,8 @@ button:active{background:#0060df}
   <div class="row"><span class="k">ax (径向)</span><input id="ax" type="number" step="0.1" value="0" style="width:100px;background:#2c2c2e;color:#fff;border:0;border-radius:6px;padding:6px;text-align:right"></div>
 </div>
 <button id="aStart">① 开始测试 (TSTA)</button>
+<button id="mOpen" style="background:#636366">开环 48% / 300ms (MTR,O)</button>
+<button id="mPid" style="background:#636366">闭环 50rev/s / 300ms (MTR,P)</button>
 <button id="aAdj" style="background:#ff9f0a">② 发偏差 (ADJ)</button>
 <button id="aStop" style="background:#ff453a">③ 结束 (TSTE)</button>
 
@@ -395,6 +400,12 @@ function aPost(url, body, okMsg){
 document.getElementById('aStart').onclick = function(){
   log('--- 开始测试 TSTA ---'); aPost('/align/start', '{}', 'TSTA');
 };
+function motorProbe(mode){
+  log('--- 电机测试 MTR,' + mode + ' (300ms, 接电池) ---');
+  aPost('/align/motor?mode=' + mode, '{}', 'MTR,' + mode);
+}
+document.getElementById('mOpen').onclick = function(){ motorProbe('O'); };
+document.getElementById('mPid').onclick = function(){ motorProbe('P'); };
 document.getElementById('aAdj').onclick = function(){
   var phi = parseFloat(document.getElementById('phi').value)||0;
   var psi = parseFloat(document.getElementById('psi').value)||0;
@@ -498,6 +509,25 @@ static void handleAlignStop() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+static void handleMotorProbe() {
+  noCache();
+  if (s_alignState != 2 || !s_radioOk || !server.hasArg("mode")) {
+    server.send(409, "application/json", "{\"ok\":false,\"msg\":\"先进入测试就绪态\"}");
+    return;
+  }
+  String mode = server.arg("mode");
+  if (mode != "O" && mode != "P") {
+    server.send(400, "application/json", "{\"ok\":false,\"msg\":\"mode 须为 O/P\"}");
+    return;
+  }
+  uint8_t tx[32] = {0};
+  snprintf((char*)tx, sizeof(tx), "MTR,%s", mode.c_str());
+  bool ok = sendRaw(tx);
+  trace("MTR,%s sent=%u; D,O/P=300ms counts,10ms counts; D,V=speedA,speedB,pwmA,pwmB",
+        mode.c_str(), (unsigned)ok);
+  server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"msg\":\"NRF 发送失败\"}");
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   /* USB CDC 无主机读时写不阻塞(否则卡~2s) */
@@ -531,6 +561,7 @@ void setup() {
   server.on("/ping", handlePing);
   server.on("/align/stat", handleAlignStat);
   server.on("/align/start", HTTP_POST, handleAlignStart);
+  server.on("/align/motor", HTTP_POST, handleMotorProbe);
   server.on("/align/adj", HTTP_POST, handleAlignAdj);
   server.on("/align/stop", HTTP_POST, handleAlignStop);
   server.begin();

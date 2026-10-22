@@ -6,6 +6,7 @@
 #include "spi.h"
 #include "usart.h"
 #include "gpio.h"
+#include "tim.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -48,6 +49,131 @@ static uint8_t safe_RxPacket(uint8_t *rxbuf)
   return 0;
 }
 
+static void send_telem(uint8_t stage, int8_t dir, int16_t a_mm, int16_t b_mm,
+                       int16_t target_mm, uint8_t pct, uint8_t rc);
+
+/* ==================== 驱动: 编码器测速 + PID + PWM ====================
+ * 逐字移植自主固件 firmware/pabi_F103rct6/Core/Src/main.c
+ * A轮 TIM2 (PA15/PB3), B轮 TIM3 (PB4/PB5), PWM TIM4 CH1-4 (PB6-PB9) */
+
+uint16_t MA_COUNTER_new = 0;
+uint16_t MA_COUNTER_old = 0;
+/* GDB 可直接读取: 每次 PID 测速的原始 10ms 计数差、测速结果和输出。 */
+volatile int16_t g_diag_delta_a = 0, g_diag_delta_b = 0;
+volatile float g_diag_speed_a = 0, g_diag_speed_b = 0;
+float MA_V_GET(void)
+{
+  int TEMP_COUNTER = 0;
+  float V_A = 0;
+  const float dt = 0.01f;
+  MA_COUNTER_new = __HAL_TIM_GET_COUNTER(&htim2);
+  TEMP_COUNTER = MA_COUNTER_new - MA_COUNTER_old;
+  g_diag_delta_a = (int16_t)((uint16_t)MA_COUNTER_new - MA_COUNTER_old);
+  if(((TEMP_COUNTER) > 10000) || ((TEMP_COUNTER) < -10000)){
+    if((TEMP_COUNTER) > 10000) V_A = ((float)(MA_COUNTER_new - (MA_COUNTER_old + 65535)) / 7.0f) / dt;
+    else                       V_A = ((float)(MA_COUNTER_new - (MA_COUNTER_old - 65535)) / 7.0f) / dt;
+  } else {
+    V_A = ((float)(TEMP_COUNTER) / 7.0f) / dt;
+  }
+  MA_COUNTER_old = MA_COUNTER_new;
+  g_diag_speed_a = V_A;
+  return V_A;
+}
+
+uint16_t MB_COUNTER_new = 0;
+uint16_t MB_COUNTER_old = 0;
+float MB_V_GET(void)
+{
+  int TEMP_COUNTER = 0;
+  float V_B = 0;
+  const float dt = 0.01f;
+  MB_COUNTER_new = __HAL_TIM_GET_COUNTER(&htim3);
+  TEMP_COUNTER = MB_COUNTER_new - MB_COUNTER_old;
+  g_diag_delta_b = (int16_t)((uint16_t)MB_COUNTER_new - MB_COUNTER_old);
+  if(((TEMP_COUNTER) > 10000) || ((TEMP_COUNTER) < -10000)){
+    if((TEMP_COUNTER) > 10000) V_B = ((float)(MB_COUNTER_new - (MB_COUNTER_old + 65535)) / 7.0f) / dt;
+    else                       V_B = ((float)(MB_COUNTER_new - (MB_COUNTER_old - 65535)) / 7.0f) / dt;
+  } else {
+    V_B = ((float)(TEMP_COUNTER) / 7.0f) / dt;
+  }
+  MB_COUNTER_old = MB_COUNTER_new;
+  g_diag_speed_b = V_B;
+  return V_B;
+}
+
+void MA_STOP(void){
+  __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_1,4199);
+  __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_2,4199);
+}
+void MB_STOP(void){
+  __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_3,4199);
+  __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_4,4199);
+}
+void motor_STOP(void){ MA_STOP(); MB_STOP(); }
+
+float err_MA = 0;
+int PIDNUM_MA = 0;
+void PID_MA(float V_Goat){
+  float kp = 18, ki = 90;
+  float V_now = 0, PIDNUM = 0, err = 0;
+  V_Goat = -V_Goat;
+  V_now = MA_V_GET();
+  if(V_Goat < 0) err = -V_Goat + V_now;
+  else           err = V_Goat - V_now;
+  float dt = 0.01f;
+  float P_term = kp * err;
+  float I_inc = err * ki * dt;
+  if ((P_term + err_MA > 4199 && I_inc > 0) || (P_term + err_MA < 0 && I_inc < 0)) {
+  } else { err_MA += I_inc; }
+  if(err_MA > 4000) err_MA = 4000;
+  else if(err_MA < -4000) err_MA = -4000;
+  PIDNUM = P_term + err_MA;
+  PIDNUM_MA = (int)PIDNUM;
+  if(PIDNUM_MA > 4199) PIDNUM_MA = 4199;
+  else if(PIDNUM_MA < 0) PIDNUM_MA = 0;
+  if(V_Goat < 0){
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_1,PIDNUM_MA);
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_2,0);
+  } else if(V_Goat > 0){
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_1,0);
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_2,PIDNUM_MA);
+  } else { MA_STOP(); }
+}
+
+float err_MB = 0;
+int PIDNUM_MB = 0;
+void PID_MB(float V_Goat){
+  float kp = 18, ki = 90;
+  float V_now = 0, PIDNUM = 0, err = 0;
+  V_Goat = -V_Goat;
+  V_now = MB_V_GET();
+  if(V_Goat < 0) err = -V_Goat + V_now;
+  else           err = V_Goat - V_now;
+  float dt = 0.01f;
+  float P_term = kp * err;
+  float I_inc = err * ki * dt;
+  if ((P_term + err_MB > 4199 && I_inc > 0) || (P_term + err_MB < 0 && I_inc < 0)) {
+  } else { err_MB += I_inc; }
+  if(err_MB > 4000) err_MB = 4000;
+  else if(err_MB < -4000) err_MB = -4000;
+  PIDNUM = P_term + err_MB;
+  PIDNUM_MB = (int)PIDNUM;
+  if(PIDNUM_MB > 4199) PIDNUM_MB = 4199;
+  else if(PIDNUM_MB < 0) PIDNUM_MB = 0;
+  if(V_Goat < 0){
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_3,PIDNUM_MB);
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_4,0);
+  } else if(V_Goat > 0){
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_3,0);
+    __HAL_TIM_SET_COMPARE(&htim4,TIM_CHANNEL_4,PIDNUM_MB);
+  } else { MB_STOP(); }
+}
+
+void Clear_All_PID(void){ err_MA = 0; err_MB = 0; PIDNUM_MA = 0; PIDNUM_MB = 0; }
+
+#include "adj_plan.h"
+
+
 /* 发一帧: 切TX -> 发 -> 回RX */
 static uint8_t send_frame(const uint8_t *buf)
 {
@@ -57,6 +183,49 @@ static uint8_t send_frame(const uint8_t *buf)
   NRF24L01_RX_Mode();
   NRF24L01_Write_Reg(FLUSH_RX, 0xFF);
   return sta;
+}
+
+/* MTR,O 与 MTR,P 分开测试, 均限时 300ms, 不能在仅有 ST-Link 供电时运行。
+ * D,P 帧: 300ms 原始编码器差、最后一轮 10ms 原始差; D,V 帧: 最后测速
+ * (用未标定的 7 count/rev 换算)和实际 PWM。发帧放在停轮之后, 不干扰 PID 周期。 */
+static void motor_probe(uint8_t closed_loop)
+{
+  uint16_t a0 = (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+  uint16_t b0 = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  uint8_t tx[32];
+  motor_STOP();
+  Clear_All_PID();
+  (void)MA_V_GET();
+  (void)MB_V_GET();
+  if (closed_loop) {
+    for (uint8_t i = 0; i < 30; ++i) {
+      PID_MA(+50.0f); PID_MB(-50.0f); /* 未标定试验速度, 不是正式值 */
+      HAL_Delay(10);
+    }
+  } else {
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 2000);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 0);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, 0);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 2000);
+    for (uint8_t i = 0; i < 30; ++i) {
+      HAL_Delay(10);
+      (void)MA_V_GET();
+      (void)MB_V_GET();
+    }
+  }
+  int16_t a = (int16_t)((uint16_t)__HAL_TIM_GET_COUNTER(&htim2) - a0);
+  int16_t b = (int16_t)((uint16_t)__HAL_TIM_GET_COUNTER(&htim3) - b0);
+  int16_t da = g_diag_delta_a, db = g_diag_delta_b;
+  int va = (int)g_diag_speed_a, vb = (int)g_diag_speed_b;
+  int pa = closed_loop ? PIDNUM_MA : 2000;
+  int pb = closed_loop ? PIDNUM_MB : 2000;
+  motor_STOP();
+  memset(tx, 0, sizeof(tx));
+  snprintf((char*)tx, sizeof(tx), "D,%c,%d,%d,%d,%d", closed_loop ? 'P' : 'O', a, b, da, db);
+  send_frame(tx);
+  memset(tx, 0, sizeof(tx));
+  snprintf((char*)tx, sizeof(tx), "D,V,%d,%d,%d,%d", va, vb, pa, pb);
+  send_frame(tx);
 }
 
 /* 视觉纠偏测试状态(非阻塞) */
@@ -111,6 +280,22 @@ int main(void)
   MX_SPI2_Init();
   MX_USART1_UART_Init();
 
+  /* 与主固件一致: TIM2/TIM3 编码器, TIM4 四路 PWM 驱动电机 */
+  MX_TIM2_Init();
+  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  MX_TIM3_Init();
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+  MX_TIM4_Init();
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4);
+  motor_STOP();
+  /* 预热测速: MA_V_GET/MB_V_GET 用 old-new 差分, old 初值 0 会算出巨大速度,
+     必须先调一次把 old 对齐到当前计数器, 否则 PID 积分被压到 0 电机不动 */
+  (void)MA_V_GET();
+  (void)MB_V_GET();
+  HAL_Delay(20);
   /* gpio.c 把 PA6 配成了 OUTPUT_PP, 但它是 NRF24L01 的 IRQ 输出引脚, 必须为 INPUT */
   {
     GPIO_InitTypeDef gi = {0};
@@ -155,34 +340,20 @@ int main(void)
         g_st = ST_IDLE;
         uint8_t tx[32]; memset(tx, 0, 32); memcpy(tx, "ACKD", 4);
         send_frame(tx);
+      } else if (memcmp(rx, "MTR,O", 5) == 0 || memcmp(rx, "MTR,P", 5) == 0) {
+        if (g_st == ST_READY) motor_probe(rx[4] == 'P');
       } else if (memcmp(rx, "ADJ,", 4) == 0) {
+        /* ADJ 仅跑纠偏规划; 开环/定速闭环必须显式发 MTR,O/P。 */
+        uint8_t rc;
         parse_adj(rx);
-        float mag = (g_phi < 0 ? -g_phi : g_phi) + (g_psi < 0 ? -g_psi : g_psi);
-        g_target_mm = (int16_t)(mag * 10.0f);
-        if (g_target_mm == 0) g_target_mm = 100;
-        g_dir = (g_phi + g_psi >= 0) ? 1 : -1;
-        g_st = ST_RUN;
-        g_run_start = HAL_GetTick();
-        g_telem_next = TELEM_STEP;
-        g_telem_n = 0;
-      }
-    }
-
-    if (g_st == ST_RUN) {
-      uint32_t el = HAL_GetTick() - g_run_start;
-      if (g_telem_n < TELEM_TOTAL && el >= g_telem_next) {
-        uint8_t pct = (uint8_t)(((uint32_t)(g_telem_n + 1) * 100) / TELEM_TOTAL);
-        int16_t a = (int16_t)((int32_t)g_target_mm * (g_telem_n + 1) / TELEM_TOTAL);
-        send_telem(1, g_dir, a, a, g_target_mm, pct, 0);
-        g_telem_n++;
-        g_telem_next += TELEM_STEP;
-      }
-      if (el >= RUN_MS) {
-        uint8_t tx[32]; memset(tx, 0, 32); memcpy(tx, "DONE", 4);
-        send_frame(tx);
+        printf("ADJ recv phi=%d psi=%d ax=%d\r\n", (int)g_phi, (int)g_psi, (int)g_ax);
+        rc = Adj_Execute(g_phi, g_psi, g_ax);
+        printf("ADJ done rc=%u\r\n", rc);
+        { uint8_t tx[32]; memset(tx, 0, 32); memcpy(tx, "DONE", 4); send_frame(tx); }
         g_st = ST_READY;
       }
     }
+
   }
 }
 

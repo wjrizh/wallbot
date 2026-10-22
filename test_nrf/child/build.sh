@@ -11,6 +11,7 @@ mkdir -p "$WORK"
 cp -a "$PRJ/Drivers" "$PRJ/gcc_build" "$PRJ/Core" "$WORK/"
 cp "$PRJ/Makefile" "$WORK/"
 cp "$HERE/main_test.c" "$WORK/Core/Src/main.c"
+cp "$HERE/adj_plan.h" "$WORK/Core/Src/adj_plan.h"
 
 cd "$WORK" && make -j4
 
