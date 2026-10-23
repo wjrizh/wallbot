@@ -962,7 +962,7 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_PI              3.14159265f
 #define ADJ_SPEED_REV       80.0f    /* 纠偏速度(电机轴转/s). kp*err=18*80≈1440→占空比~34%; 8.0时仅~3%低于静摩擦,轮不动A=B=0 */
 #define ADJ_MM_PER_MOTORREV 0.3555f /* 里程计 mm/电机轴转: π×轮径43 / 减速比380; 卷尺复核可再微调 */
-#define ADJ_TRACK_MM        100.0f   /* ⚠️占位待标定: 两驱动轮接触点间距(mm) */
+#define ADJ_TRACK_MM        145.0f   /* 两驱动轮接触点间距(mm), 实测值; 影响 Spin 弧长换算 */
 #define ADJ_PIPE_R_MM       250.0f   /* 管道外半径(mm): 用户指定 R=250 (直径约50cm) */
 #define ADJ_DIAG_BETA_DEG   30.0f    /* 轴向斜行定角(deg), 最大自旋=2×β */
 #define ADJ_MV_SIGN         (+1)     /* 标定: φ>0 时应往哪边走(+1=下降方向) */
@@ -1285,13 +1285,14 @@ uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
   float phi = phi_deg * ADJ_DEMO_GAIN;
   float psi = psi_deg * ADJ_DEMO_GAIN;
   float ax  = ax_mm;
+  float dphi;
   uint8_t rc = 0;
-  uint8_t st = ADJ_FSM_GATE_AX;
 
   Clear_All_PID();
   if(fabsf(phi) < ADJ_TOL_PHI) phi = 0;
   if(fabsf(psi) < ADJ_TOL_PSI) psi = 0;
   if(fabsf(ax)  < ADJ_TOL_AX)  ax  = 0;
+  dphi = phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN;
   {
     char lb[52];
     snprintf(lb, sizeof(lb), "start in %d/%d/%d -> %d/%d/%d",
@@ -1299,53 +1300,55 @@ uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
     Adj_Log(lb);
   }
 
-  while(st != ADJ_FSM_DONE){
-    switch(st){
-      case ADJ_FSM_GATE_AX:
-        /* ax 已按 ADJ_TOL_AX 清零: 非零才走轴向, 否则直接纠航向+周向 */
-        if(ax != 0.0f){
-          st = ADJ_FSM_AXIAL;
-        } else {
-          if(Adj_Settle()){ rc = 1; st = ADJ_FSM_DONE; break; }
-          st = ADJ_FSM_SPIN;
-        }
-        break;
-
-      case ADJ_FSM_AXIAL:
-        rc = Adj_Axial(ax);
-        if(rc){ st = ADJ_FSM_DONE; break; }
-        if(Adj_Settle()){ rc = 1; st = ADJ_FSM_DONE; break; }
-        st = ADJ_FSM_SPIN;
-        break;
-
-      case ADJ_FSM_SPIN:
-        if(psi != 0.0f){
-          rc = Adj_Spin(-psi * (float)ADJ_SPIN_SIGN);
-          if(rc){ st = ADJ_FSM_DONE; break; }
-        }
-        if(Adj_Settle()){ rc = 1; st = ADJ_FSM_DONE; break; }
-        st = ADJ_FSM_MOVE;
-        break;
-
-      case ADJ_FSM_MOVE:
-        if(phi != 0.0f){
-          float dphi = phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN;
+  if(ax != 0.0f){
+    /* 融合规划: 轴向并进一次斜行, 航向只进第一段转角, 周向扣掉斜行投影
+     * Spin(β-ψ) -> Move(L) -> Spin(-β) -> Move(dphi - L*cosβ)
+     * 几何: L*sinβ=|ax| (轴向到位); L*cosβ = 斜行多走的周向, 末段扣回
+     * 两段转角之和 (β-ψ)+(-β) = -ψ, 顺带把航向纠回目标切向 */
+    float beta   = ADJ_DIAG_BETA_DEG * ADJ_PI / 180.0f;
+    float L      = fabsf(ax) / sinf(beta) * ADJ_AXIAL_L_K;
+    float bsign  = (ax > 0.0f ? 1.0f : -1.0f) * (float)ADJ_AXIAL_SIGN;
+    float beta_s = bsign * beta;
+    float psi_r  = psi * ADJ_PI / 180.0f * (float)ADJ_SPIN_SIGN;
+    float th1    = (beta_s - psi_r) * 180.0f / ADJ_PI;
+    float th2    = -beta_s * 180.0f / ADJ_PI;
+    float dres   = dphi - L * cosf(beta);
+    {
+      char lb[52];
+      snprintf(lb, sizeof(lb), "axfu ax%d L%d t1%d t2%d",
+               (int)ax, (int)L, (int)th1, (int)th2);
+      Adj_Log(lb);
+    }
+    rc = Adj_Spin(th1);   if(rc) goto out;
+    if(Adj_Settle()){ rc = 1; goto out; }
+    rc = Adj_Move(+L);    if(rc) goto out;
+    if(Adj_Settle()){ rc = 1; goto out; }
+    rc = Adj_Spin(th2);   if(rc) goto out;
+    if(Adj_Settle()){ rc = 1; goto out; }
+    rc = Adj_Move(dres);  if(rc) goto out;
+    {
+      char lb[52];
+      snprintf(lb, sizeof(lb), "axfu2 d%d/%d", (int)dres, (int)g_adj_last_mm);
+      Adj_Log(lb);
+    }
+  } else {
+    /* 无轴向: 先纠航向再纠周向 */
+    if(psi != 0.0f){
+      rc = Adj_Spin(-psi * (float)ADJ_SPIN_SIGN);
+      if(rc) goto out;
+    }
+    if(Adj_Settle()){ rc = 1; goto out; }
+    if(phi != 0.0f){
 #if ADJ_MOVE_TIMED
-          rc = Adj_MoveTimed(dphi);
+      rc = Adj_MoveTimed(dphi);
 #else
-          rc = Adj_Move(dphi);
+      rc = Adj_Move(dphi);
 #endif
-          if(rc){ st = ADJ_FSM_DONE; break; }
-        }
-        st = ADJ_FSM_DONE;
-        break;
-
-      default:
-        st = ADJ_FSM_DONE;
-        break;
+      if(rc) goto out;
     }
   }
 
+out:
   motor_STOP();
   {
     char lb[52];
