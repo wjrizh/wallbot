@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -691,6 +691,12 @@ static uint8_t Coop_TakeAbort(const uint8_t *buf){
     return 0;
   }
   if(Coop_IsProtoFrame(buf)){
+    return 0;
+  }
+  /* Align/Test: fan KEY 3+/4-/6 stop with axes 0 — adjust PWM, do not abort ADJ */
+  if(buf[1] == 0 && buf[2] == 0 &&
+     (buf[5] == 3 || buf[5] == 4 || buf[5] == 6)){
+    FENG_Motor_SET((int8_t)buf[5]);
     return 0;
   }
   if(buf[5] != 0 || buf[1] != 0 || buf[2] != 0){

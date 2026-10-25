@@ -176,6 +176,6 @@
 #define AV_CMD_MIN_PHI        0.8f
 #define AV_CMD_MIN_PSI        0.8f
 #define AV_CMD_MIN_AX         3.0f
-#define AV_DEFAULT_GAIN_PCT   30      /* 默认 0.3 倍缩放, 首测安全 */
+#define AV_DEFAULT_GAIN_PCT   100      /* 默认 0.3 倍缩放, 首测安全 */
 
 #endif

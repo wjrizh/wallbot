@@ -43,7 +43,7 @@ static uint8_t s_maxIter  = AV_MAX_ITER;
 static uint8_t s_flags    = 0;
 
 /* 标定参数 (NVS 持久化) */
-static int8_t  s_signPhi = 1, s_signPsi = 1, s_signAx = 1;
+static int8_t  s_signPhi = 1, s_signPsi = -1, s_signAx = 1;
 static uint8_t s_betaDeg = 20, s_speedPct = 100;
 
 /* 单步 */
@@ -79,7 +79,7 @@ static void loadTune(void) {
         return;
     }
     s_signPhi  = (int8_t)s_prefs.getChar("sPhi", 1);
-    s_signPsi  = (int8_t)s_prefs.getChar("sPsi", 1);
+    s_signPsi  = (int8_t)s_prefs.getChar("sPsi", -1);
     s_signAx   = (int8_t)s_prefs.getChar("sAx", 1);
     s_betaDeg  = (uint8_t)s_prefs.getUChar("beta", 20);
     s_speedPct = (uint8_t)s_prefs.getUChar("spd", 100);

@@ -19,6 +19,7 @@
     STEP:          0x13,
     U_TURN:        0x14,
     JOYPAD:        0x18,
+    CHILD_CMD:     0x20,
     COOP_START:    0x19,
     COOP_SIMPLE:   0x1A,
     GRIPPER:       0x1B,
@@ -265,6 +266,11 @@
     joypad: function (lh, lv, rh, rv, key) {
       return buildFrame(CMD.JOYPAD, new Uint8Array([
         lh & 0xFF, lv & 0xFF, rh & 0xFF, rv & 0xFF, key & 0xFF
+      ]));
+    },
+    childCmd: function (speed, spin, key) {
+      return buildFrame(CMD.CHILD_CMD, new Uint8Array([
+        speed & 0xFF, spin & 0xFF, key & 0xFF
       ]));
     },
     pump: function (id, state) { return buildFrame(CMD.PUMP, new Uint8Array([id & 0xFF, state & 0xFF])); },

@@ -128,6 +128,17 @@
     ctrl.appendChild(btnStop);
     body.appendChild(ctrl);
 
+    var fanRow = this._el("div", "av-btns");
+    var mkFan = function (label, key, cls) {
+      var b = self._el("button", "av-btn " + (cls || ""), label);
+      b.addEventListener("click", function () { self._sendFanKey(key); });
+      return b;
+    };
+    fanRow.appendChild(mkFan("风机+", 3, "av-btn-ok"));
+    fanRow.appendChild(mkFan("风机−", 4, ""));
+    fanRow.appendChild(mkFan("停风机", 6, "av-btn-danger"));
+    body.appendChild(fanRow);
+
     var stRow = this._el("div", "align-row");
     stRow.appendChild(this._el("span", "align-k", "状态"));
     this._stateEl = this._el("span", "align-v", "空闲");
@@ -238,7 +249,7 @@
     var vGainRow = this._el("div", "align-row");
     vGainRow.appendChild(this._el("span", "align-k", "增益%"));
     var vGain = document.createElement("input");
-    vGain.type = "number"; vGain.className = "debug-input"; vGain.value = "30";
+    vGain.type = "number"; vGain.className = "debug-input"; vGain.value = "100";
     vGain.style.maxWidth = "70px";
     this._vGain = vGain;
     vGainRow.appendChild(vGain);
@@ -266,7 +277,7 @@
       return s;
     };
     this._vSPhi = mkSign("φ", 1);
-    this._vSPsi = mkSign("ψ", 1);
+    this._vSPsi = mkSign("ψ", -1);
     this._vSAx  = mkSign("ax", 1);
     vSignRow.appendChild(this._vSPhi);
     vSignRow.appendChild(this._vSPsi);
@@ -339,6 +350,16 @@
     var ok = this.app.transport.send(frame);
     this._log((ok ? "→ " : "✗ ") + desc, !ok);
     return ok;
+  };
+
+  AlignModule.prototype._sendFanKey = function (key) {
+    if (!this.app || !this.app.transport || typeof Protocol === "undefined" || !Protocol.childCmd) {
+      this._log("风机: Protocol.childCmd 不可用", true);
+      return;
+    }
+    var ok = this.app.transport.send(Protocol.childCmd(0, 0, key & 0xFF));
+    var name = key === 3 ? "风机+" : (key === 4 ? "风机−" : (key === 6 ? "停风机" : ("KEY=" + key)));
+    this._log("风机 " + name + (ok ? "" : " (未发送)"), !ok);
   };
 
   AlignModule.prototype._start = function () {
@@ -510,7 +531,7 @@
       this._log("已停止监视, 闭环结束后自动恢复");
     }
     var gain = parseInt(this._vGain.value, 10);
-    if (isNaN(gain)) gain = 30;
+    if (isNaN(gain)) gain = 100;
     var iter = parseInt(this._vIter.value, 10);
     if (isNaN(iter)) iter = 30;
     if (iter < 1) iter = 1;
