@@ -23,6 +23,7 @@
 #include "imu_driver.h"
 #include "laser_tof.h"
 #include "auto_mode.h"
+#include "align_test.h"
 #include "coop_vision.h"
 
 bool g_imu_online = false;
@@ -232,8 +233,21 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
             /* 0x19 启动协同: 可带 K230 ip[4] (App 自动发现结果, 母机 NVS 持久化;
                无 payload 时用上次保存的地址) */
             case 0x19: {
+                if (AlignTest_IsActive()) { code = 1; break; }
                 if (pay_len >= 4 && p) CoopVision_SetBase(p);
                 AutoMode_StartCoop();
+                break;
+            }
+            /* 0x30 独立视觉纠偏测试启动: 可带 K230 ip[4] */
+            case 0x30: {
+                if (AutoMode_IsActive()) { code = 1; break; }
+                if (pay_len >= 4 && p) CoopVision_SetBase(p);
+                AlignTest_Start();
+                break;
+            }
+            /* 0x32 停止独立纠偏测试 */
+            case 0x32: {
+                AlignTest_Stop();
                 break;
             }
             /* 0x24 视觉纠偏标定: signPhi signPsi signAx betaDeg speedPct */
@@ -404,7 +418,8 @@ void WebServer_SendLog(const char* msg) {
 void WebServer_PushAlignState(void) {
     if (ws.count() == 0) return;
     uint8_t pay[11];
-    AutoMode_FillVisionStatus(pay);
+    if (AlignTest_IsActive()) AlignTest_FillVisionStatus(pay);
+    else AutoMode_FillVisionStatus(pay);
     uint8_t frame[2 + 1 + 1 + 11 + 2];
     frame[0] = 0xAA; frame[1] = 0x55;
     frame[2] = 0x88;

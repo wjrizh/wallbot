@@ -25,7 +25,9 @@
     GRIPPER:       0x1B,
     AVOID_RUN:     0x1C,
     COOP_ABORT:    0x1D,
-    ALIGN_TUNE:    0x24
+    ALIGN_TUNE:    0x24,
+    TEST_START:    0x30,
+    TEST_STOP:     0x32
   };
 
   /* 协同视觉纠偏: 状态帧 0x88 / 视觉 JSON 0x89
@@ -35,7 +37,7 @@
   var ALIGN_STATE_LEN = 11;
   var ALIGN_STATE_TEXT = {
     0: '空闲', 1: '记参考中', 2: '测量中', 3: '参考已就绪',
-    4: '参考失败', 5: '测量完成', 6: '测量失败', 200: '协同进行中'
+    4: '参考失败', 5: '测量完成', 6: '测量失败', 200: '协同进行中', 201: '纠偏测试中'
   };
 
   var CAN_SUB = { ENABLE: 0, DISABLE: 1, SET_ZERO: 2 };
@@ -261,7 +263,13 @@
       return buildFrame(CMD.ALIGN_TUNE, new Uint8Array([
         i8(signPhi), i8(signPsi), i8(signAx), betaDeg & 0xFF, speedPct & 0xFF
       ]));
-    }
+    },
+    /* 独立纠偏测试: 0x30 启动(可带 K230 ip), 0x32 停止 */
+    testStart: function (ip) {
+      var p = ipToBytes(ip);
+      return buildFrame(CMD.TEST_START, p);
+    },
+    testStop: function () { return buildFrame(CMD.TEST_STOP, null); }
   };
 
   global.Protocol = Protocol;

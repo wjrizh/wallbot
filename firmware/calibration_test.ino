@@ -17,6 +17,7 @@
 #include "avoid_mode.h"
 #include "imu_driver.h"
 #include "coop_vision.h"      // 协同内视觉纠偏
+#include "align_test.h"       // 独立视觉纠偏测试 (0x30/0x32)
 #include <Arduino.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
@@ -117,6 +118,9 @@ void setup() {
     /* 4.10 协同内视觉纠偏 (HTTP 拉 K230, auto_mode 状态机驱动) */
     CoopVision_Init();
     xTaskCreate(CoopVision_Task, "CoopVision", 8192, NULL, 1, NULL);
+
+    /* 4.11 独立视觉纠偏测试 (与协同互斥, 复用 CoopVision) */
+    AlignTest_Init();
 
     /* 6. 推送任务 */
     xTaskCreate(Task_PushLaser, "PushLaser", 4096, NULL, 1, NULL);

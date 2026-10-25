@@ -3,6 +3,7 @@
 #include "servo_driver.h"
 #include "child_cmd.h"
 #include "coop_vision.h"
+#include "align_test.h"
 #include "web_server.h"
 #include "config.h"
 #include <Arduino.h>
@@ -113,6 +114,11 @@ void AutoMode_StartCoop(void) {
     if (g_cs != COOP_IDLE) {
         Serial.printf("[COOP] 已在协同中 (state=%u), 拒绝\n", (unsigned)g_cs);
         WebServer_SendLog("[COOP] 已在协同中, 拒绝再次启动");
+        return;
+    }
+    if (AlignTest_IsActive()) {
+        Serial.println("[COOP] align-test active, reject coop");
+        WebServer_SendLog("[COOP] align-test active, reject");
         return;
     }
     CoopVision_Reset();

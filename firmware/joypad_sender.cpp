@@ -2,6 +2,7 @@
 #include "joypad_input.h"
 #include "nrf_sender.h"
 #include "auto_mode.h"
+#include "align_test.h"
 #include "child_cmd.h"
 #include "config.h"
 #include <Arduino.h>
@@ -59,25 +60,34 @@ void JoypadSender_Task(void *pvParameters) {
         buf[4] = (uint8_t)(int8_t)last_rv;
         buf[5] = last_key;
 
-        if (AutoMode_IsActive()) {
-            /* 协同帧最长 21 字节 (ADJ,-10.0,-10.0,-30.0), 缓冲必须够大 */
+        if (AutoMode_IsActive() || AlignTest_IsActive()) {
+            /* 协同/纠偏测试帧最长 21 字节 (ADJ,...), 缓冲必须够大 */
             uint8_t fbuf[32]; uint8_t flen = 0;
             if (AutoMode_WantsSendFrame(fbuf, &flen)) {
                 NRF_StopListening();
                 NRF_SendFrame(fbuf, flen);
-                AutoMode_OnFrameSent();   /* 无论成败都推进状态+切RX, 失败视为丢帧 */
+                AutoMode_OnFrameSent();
+            } else if (AlignTest_WantsSendFrame(fbuf, &flen)) {
+                NRF_StopListening();
+                NRF_SendFrame(fbuf, flen);
+                AlignTest_OnFrameSent();
             }
-            AutoMode_Tick();
+            if (AutoMode_IsActive()) AutoMode_Tick();
+            if (AlignTest_IsActive()) AlignTest_Tick();
             vTaskDelayUntil(&xLastWakeTime, period);
             continue;
         }
 
-        /* 协同已退出但仍有遗留帧 (如 STOP) 待发, 优先发出 */
+        /* 已退出但仍有遗留帧 (STOP/TSTE) 待发, 优先发出 */
         uint8_t fbuf[32]; uint8_t flen = 0;
         if (AutoMode_WantsSendFrame(fbuf, &flen)) {
             NRF_StopListening();
             NRF_SendFrame(fbuf, flen);
             AutoMode_OnFrameSent();
+        } else if (AlignTest_WantsSendFrame(fbuf, &flen)) {
+            NRF_StopListening();
+            NRF_SendFrame(fbuf, flen);
+            AlignTest_OnFrameSent();
         }
 
         /* 子机指令直通 (App 按键): 优先于虚拟手柄帧 */

@@ -1,15 +1,14 @@
 /*
- * modules/align.js - 视觉纠偏面板（协同内自动）
+ * modules/align.js - 视觉纠偏面板
  *
- * 纠偏已成为子母协同的自动环节: 「启动协同」后母机 auto_mode 状态机
- * 自动完成 记参考 → 测量 → ADJ 下发 → 收敛 → 夹紧, 本面板不再发闭环命令。
- * 面板职责:
- *   ① 姿态示意 (0x88 推送驱动)
- *   ② 视觉板 IP / 符号标定 (0x24) / 人手推车监视 + 手动记参考 (直连 K230)
+ * ① 独立纠偏测试: App 0x30 启 / 0x32 停 (母机 AlignTest: TSTA->REDY->ref/meas/ADJ->GOON->DONE->TSTE)
+ * ② 协同内自动纠偏仍由 0x19 驱动 (不变)
+ * ③ 姿态示意 (0x88) / 标定 0x24 / 监视+手动记参考 (直连 K230)
  *
  * 数据通道:
- *   状态/JSON  <- WS 0x88/0x89 (母机 200ms 周期推)
- *   监视/记参考 -> App 直连 K230 HTTP (fetch)
+ *   状态/JSON  <- WS 0x88/0x89 (母机周期推, 协同与测试共用)
+ *   启停/标定  -> WS 0x30/0x32/0x24
+ *   监视/记参考 -> App 直连 K230 HTTP
  */
 (function (global) {
   "use strict";
@@ -77,7 +76,7 @@
     var drawer = this._el("div", "align-drawer");
 
     var head = this._el("div", "debug-head");
-    head.appendChild(this._el("div", "debug-title", "视觉纠偏（协同内）"));
+    head.appendChild(this._el("div", "debug-title", "视觉纠偏"));
     var closeBtn = this._el("button", "debug-close", "×");
     closeBtn.addEventListener("click", function () { self.close(); });
     head.appendChild(closeBtn);
@@ -85,7 +84,7 @@
     var body = this._el("div", "align-body");
 
     body.appendChild(this._el("div", "align-note",
-      "纠偏已并入协同: 「启动协同」后自动记参考→测量→纠偏→夹紧。本面板用于监视与标定。"));
+      "独立测试: 下方「开始纠偏」走 TSTA→REDY→记参考→测量→ADJ→收敛→GOON→DONE→TSTE；与「启动协同」互斥。亦可只监视/标定。"));
 
     var stRow = this._el("div", "align-row");
     stRow.appendChild(this._el("span", "align-k", "状态"));
@@ -148,12 +147,17 @@
     vSignRow.appendChild(btnTune);
     body.appendChild(vSignRow);
 
-    var vCtrlRow = this._el("div", "av-btns");
+    var testRow = this._el("div", "av-btns");
     var mkBtn = function (label, fn, cls) {
       var b = self._el("button", "av-btn " + (cls || ""), label);
       b.addEventListener("click", fn);
       return b;
     };
+    testRow.appendChild(mkBtn("开始纠偏", function () { self._testStart(); }, "av-btn-ok"));
+    testRow.appendChild(mkBtn("停止", function () { self._testStop(); }, "av-btn-danger"));
+    body.appendChild(testRow);
+
+    var vCtrlRow = this._el("div", "av-btns");
     this._vMonBtn = mkBtn("监视: 关", function () { self._toggleMonitor(); });
     vCtrlRow.appendChild(this._vMonBtn);
     vCtrlRow.appendChild(mkBtn("记参考", function () { self._camRef(); }));
@@ -207,6 +211,18 @@
     this._send(frame, "ALIGN_TUNE sign=" + sPhi + "/" + sPsi + "/" + sAx);
   };
 
+  AlignModule.prototype._testStart = function () {
+    var ip = this._resolveVisionIp();
+    if (this._mon.on) this._stopMonitor();
+    var frame = global.Protocol.testStart(ip || undefined);
+    this._send(frame, "TEST_START 0x30" + (ip ? (" ip=" + ip) : " (用母机上次 IP)"));
+  };
+
+  AlignModule.prototype._testStop = function () {
+    var frame = global.Protocol.testStop();
+    this._send(frame, "TEST_STOP 0x32");
+  };
+
   /* ==================== 0x88 / 0x89 ==================== */
 
   AlignModule.prototype._onAlignState = function (s) {
@@ -221,12 +237,12 @@
 
     /* 协同视觉测量期间: K230 被母机 /align/once 共识阻塞, 子机流出帧慢/可能断,
        置检测模式防止 App 把地址判失效; 同时暂停监视避免抢 K230 单线程 */
-    var busy = (s.state === 1 || s.state === 2);
+    var busy = (s.state === 1 || s.state === 2 || s.state === 201);
     var cam = this.app && this.app.camera;
     if (cam && typeof cam.setDetectMode === "function") cam.setDetectMode("child", busy);
     if (busy && this._mon.on) {
       this._stopMonitor();
-      this._log("协同纠偏测量中, 已暂停监视 (协同结束后可手动恢复)");
+      this._log("纠偏测量中, 已暂停监视 (结束后可手动恢复)");
     }
   };
 

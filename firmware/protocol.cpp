@@ -16,6 +16,7 @@
 #include "joypad_input.h"
 #include "joypad_sender.h"
 #include "auto_mode.h"
+#include "align_test.h"
 #include "gripper.h"
 #include "avoid_mode.h"
 #include "child_cmd.h"
@@ -257,7 +258,7 @@ void Protocol_ProcessFrame(const uint8_t* data, uint16_t len) {
         /* 0x20: 子机运动帧直通, payload: speed(1) spin(1) key(1) */
         case 0x20: {
             if (pay_len < 3 || !p) { code = 1; break; }
-            if (AutoMode_IsActive()) { code = 1; break; }   /* 协同中拒绝 */
+            if (AutoMode_IsActive() || AlignTest_IsActive()) { code = 1; break; } /* 协同/纠偏测试中拒绝 */
             ChildCmd_Set((int8_t)p[0], (int8_t)p[1], p[2]);
             Serial.printf("[CMD] 子机直通 speed=%d spin=%d key=%u\n",
                           (int)(int8_t)p[0], (int)(int8_t)p[1], p[2]);

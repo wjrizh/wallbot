@@ -475,6 +475,7 @@ void DUO_Motor_SET(int8_t key){
 int8_t Arr_RX[32] = {0};
 static uint8_t Coop_PollAbort(void);
 static uint8_t Adj_WaitLoop(void);
+static uint8_t Test_WaitLoop(void);
 void Clear_All_PID(void);
 
 uint8_t FENG_Motor_ON(void){
@@ -524,6 +525,9 @@ void DUO_Motor_OFF(void){
 #define ADJ_WAIT_MS  180000u    /* 纠偏等待总时限(ms), 超时视为母机失联 */
 #define COOP_IMU_PERIOD_MS  200u
 static uint8_t g_coop_prefetched = 0;   /* 主循环手动态预取到 COOP, 交给 AUTO() 消费 */
+#define TSTA_CMD  "TSTA"   /* mother->child: enter vision-adj test */
+#define TSTE_CMD  "TSTE"   /* mother->child: exit test */
+static volatile uint8_t g_tsta_pending = 0;   /* outer TSTA/key8, consume in Test_WaitLoop */
 
 /* 解析 ADJ, 帧载荷 → 存入 g_adj_* */
 static void Adj_ParseStore(const uint8_t *buf){
@@ -669,7 +673,8 @@ static uint8_t Coop_IsProtoFrame(const uint8_t *buf){
   return (uint8_t)(Coop_FindFrame(buf, COOP_CMD) || Coop_FindFrame(buf, GOON_CMD) ||
                    Coop_FindFrame(buf, LOCK_CMD) || Coop_FindFrame(buf, STOP_CMD) ||
                    Coop_FindFrame(buf, REDY_RSP) || Coop_FindFrame(buf, DONE_RSP) ||
-                   Coop_FindFrame(buf, ACKD_RSP) || Coop_FindFrame(buf, ADJ_CMD));
+                   Coop_FindFrame(buf, ACKD_RSP) || Coop_FindFrame(buf, ADJ_CMD) ||
+                   Coop_FindFrame(buf, TSTA_CMD) || Coop_FindFrame(buf, TSTE_CMD));
 }
 
 /* 1=中止并写入 Arr_RX; STOP 清摇杆, 遥控帧原样拷贝 */
@@ -973,7 +978,7 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_SETTLE_MS       150      /* 段间刹车稳定等待 */
 #define ADJ_DEMO_GAIN       1.0f     /* 调试放大 phi/psi; 默认1=真实角度, 调试可改5 */
 #define ADJ_SLIP_DIFF_MM    50.0f    /* 历史打滑门限; Adj_Move 打滑检测已按用户要求去掉, 此宏暂保留不用 */
-#define ADJ_SELF_TEST       1        /* 1=作业模式下 key8 触发一次演示纠偏 */
+#define ADJ_SELF_TEST       1        /* 1=work-mode key8 enters standalone adj test (TSTA path) */
 #define ADJ_ST_AXIAL        1
 #define ADJ_ST_SPIN         2
 #define ADJ_ST_MOVE         3
@@ -1412,6 +1417,10 @@ static uint8_t Adj_WaitLoop(void){
         printf("ADJ aligned, exit wait\r\n");
         return 0;                                   /* 对齐: 调用方发DONE */
       }
+      if(Coop_FindFrame(buf, TSTE_CMD)){
+        printf("ADJ wait: TSTE, exit\r\n");
+        return 1;                                   /* standalone test exit */
+      }
       if(Coop_FindFrame(buf, ADJ_CMD)){
         uint8_t rc;
         Adj_ParseStore(buf);
@@ -1432,19 +1441,100 @@ static uint8_t Adj_WaitLoop(void){
   }
 }
 
+/* standalone vision-adj test (parallel to AUTO):
+ * mother->child: TSTA / ADJ,<phi>,<psi>,<ax> / GOON / TSTE / STOP
+ * child->mother: REDY (not old TSTB) / DONE
+ * reuse Adj_WaitLoop + Adj_Execute; no fake deviation
+ * return: 0=not entered (run AUTO) 1=test exited */
+static uint8_t Test_WaitLoop(void){
+  uint8_t buf[32];
+  uint8_t rc;
+
+  /* outer already prefetched COOP for AUTO — do not block again */
+  if(g_coop_prefetched){
+    return 0;
+  }
+
+  if(!g_tsta_pending){
+    printf("TEST wait: TSTA for test, COOP for AUTO\r\n");
+    NRF24L01_Write_Reg(FLUSH_RX, 0xff);
+    while(1){
+      if(safe_RxPacket(buf) == 0){
+        if(Coop_FindFrame(buf, TSTA_CMD)){
+          printf("TSTA received, enter test\r\n");
+          break;
+        }
+        if(Coop_FindFrame(buf, COOP_CMD)){
+          printf("COOP received, run AUTO\r\n");
+          g_coop_prefetched = 1;
+          return 0;
+        }
+        if(Coop_TakeAbort(buf)){
+          printf("TEST abort before start\r\n");
+          return 1;
+        }
+      }
+    }
+  }
+
+  g_tsta_pending = 0;
+  g_coop_report_en = 1;
+  g_imu_last_tx_us = 0;
+  Coop_SendFrame(REDY_RSP);                         /* REDY, not TSTB */
+  printf("TEST: REDY sent, Adj_WaitLoop\r\n");
+
+  rc = Adj_WaitLoop();
+  g_coop_report_en = 0;
+  if(rc != 0){
+    printf("TEST adj end rc=%u\r\n", (unsigned)rc);
+    motor_STOP();
+    return 1;
+  }
+
+  Coop_SendFrame(DONE_RSP);
+  printf("TEST: DONE, wait TSTE\r\n");
+  NRF24L01_Write_Reg(FLUSH_RX, 0xff);
+  while(1){
+    if(safe_RxPacket(buf) == 0){
+      if(Coop_FindFrame(buf, TSTE_CMD)){
+        printf("TSTE received, exit test\r\n");
+        motor_STOP();
+        return 1;
+      }
+      if(Coop_FindFrame(buf, TSTA_CMD)){
+        g_coop_report_en = 1;
+        g_imu_last_tx_us = 0;
+        Coop_SendFrame(REDY_RSP);
+        rc = Adj_WaitLoop();
+        g_coop_report_en = 0;
+        if(rc != 0){ motor_STOP(); return 1; }
+        Coop_SendFrame(DONE_RSP);
+        NRF24L01_Write_Reg(FLUSH_RX, 0xff);
+        continue;
+      }
+      if(Coop_TakeAbort(buf)){
+        printf("TEST abort after DONE\r\n");
+        motor_STOP();
+        return 1;
+      }
+    }
+  }
+}
+
 static void ApplyRemoteKey(int8_t key){
   if(key == 0) return;
   if(MODE == 11){
     /* 作业模式: 风机(3增/4减/6停); 舵机1=一点一点下压(+142/按) 2=一点一点抬升(-142/按);
-       key9退出; key8=纠偏自检(ADJ_SELF_TEST=1时, 用占位常数跑一次演示纠偏) */
+       key9退出; key8=纠偏自检(ADJ_SELF_TEST=1时进独立TSTA纠偏测试环) */
     if(key == 9){
       MODE = 9;                 /* key=9 退出作业模式, 回手操 */
       Clear_All_PID();
       printf("WORK MODE off\r\n");
     } else if(key == 8 && ADJ_SELF_TEST){
-      printf("ADJ self test: phi=%d psi=%d ax=%d\r\n",
-             (int)ADJ_TEST_PHI, (int)ADJ_TEST_PSI, (int)ADJ_TEST_AX);
-      Adj_Execute(ADJ_TEST_PHI, ADJ_TEST_PSI, ADJ_TEST_AX);
+      /* bench: enter standalone adj test (wait mother ADJ/GOON/TSTE) */
+      printf("ADJ self test: enter TSTA path\r\n");
+      g_tsta_pending = 1;
+      MODE = 10;
     } else if(key == 1){
       /* 下压: 一点一点往下(每按+142, 第一版行为), 不直接跳作业角 */
       DUO_Motor_SET(1);
@@ -1642,7 +1732,10 @@ int main(void)
 
     /* 协同模式: 接收由 AUTO() 内部独占, 外层不得抢 RX FIFO */
     if(MODE == 10){
-      AUTO();
+      /* standalone test first (TSTA/pending); 0 => run AUTO(COOP) */
+      if(Test_WaitLoop() == 0){
+        AUTO();
+      }
       /* 中止/正常退出: 保持吸力, 切手操; key=6 在此停风机 */
       MODE = 9;
       g_coop_report_en = 0;
@@ -1655,7 +1748,13 @@ int main(void)
     }
 
     if(safe_RxPacket((uint8_t *)Arr_RX)==0){
-        /* 手动模式下收到 COOP: 进入协同 (帧已预取, 由 AUTO() 消费) */
+        /* manual: TSTA=>standalone adj test; COOP=>AUTO */
+        if(Coop_FindFrame((const uint8_t *)Arr_RX, TSTA_CMD)){
+          g_tsta_pending = 1;
+          MODE = 10;
+          memset(Arr_RX, 0, 32);
+          continue;
+        }
         if(Coop_FindFrame((const uint8_t *)Arr_RX, COOP_CMD)){
           g_coop_prefetched = 1;
           MODE = 10;
