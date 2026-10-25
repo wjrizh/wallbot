@@ -353,11 +353,12 @@
   };
 
   AlignModule.prototype._sendFanKey = function (key) {
-    if (!this.app || !this.app.transport || typeof Protocol === "undefined" || !Protocol.childCmd) {
+    var P = global.Protocol;
+    if (!this.app || !this.app.transport || !P || typeof P.childCmd !== "function") {
       this._log("风机: Protocol.childCmd 不可用", true);
       return;
     }
-    var ok = this.app.transport.send(Protocol.childCmd(0, 0, key & 0xFF));
+    var ok = this.app.transport.send(P.childCmd(0, 0, key & 0xFF));
     var name = key === 3 ? "风机+" : (key === 4 ? "风机−" : (key === 6 ? "停风机" : ("KEY=" + key)));
     this._log("风机 " + name + (ok ? "" : " (未发送)"), !ok);
   };
