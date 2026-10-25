@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -962,9 +962,9 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_PI              3.14159265f
 #define ADJ_SPEED_REV       80.0f    /* 纠偏速度(电机轴转/s). kp*err=18*80≈1440→占空比~34%; 8.0时仅~3%低于静摩擦,轮不动A=B=0 */
 #define ADJ_MM_PER_MOTORREV 0.3555f /* 里程计 mm/电机轴转: π×轮径43 / 减速比380; 卷尺复核可再微调 */
-#define ADJ_TRACK_MM        145.0f   /* 两驱动轮接触点间距(mm), 实测值; 影响 Spin 弧长换算 */
+#define ADJ_TRACK_MM        145.0f   /* wheel track mm (measured 145) */
 #define ADJ_PIPE_R_MM       250.0f   /* 管道外半径(mm): 用户指定 R=250 (直径约50cm) */
-#define ADJ_DIAG_BETA_DEG   30.0f    /* 轴向斜行定角(deg), 最大自旋=2×β */
+#define ADJ_DIAG_BETA_DEG   20.0f    /* 轴向斜行定角(deg), 最大自旋=2×β */
 #define ADJ_MV_SIGN         (+1)     /* 标定: φ>0 时应往哪边走(+1=下降方向) */
 #define ADJ_SPIN_SIGN       (+1)     /* 标定: ψ>0 时应往哪边转(+1=S+方向) */
 #define ADJ_AXIAL_SIGN      (+1)     /* 标定: S+歪头后前进, 轴向分量朝哪边(+1=+ax侧) */
@@ -1269,30 +1269,44 @@ static uint8_t Adj_Axial(float ax_mm){
   }
   return 0;
 }
-/* 纠偏状态机: 轴向 |ax| < ADJ_TOL_AX 时跳过轴向, 只纠航向(psi)再纠周向(phi) */
+/* 融合纠偏规划 (保留 Adj_WaitLoop 视觉复测; 协议不变)
+ * 摄像头给出误差 φ(周向deg), ψ(航向deg), ax(轴向mm), 死区清零后:
+ *   ψ=0 表示车头已对齐「纯周向直行」姿态.
+ *   β = sign(ax)*ADJ_AXIAL_SIGN*ADJ_DIAG_BETA_DEG  目标斜航向(相对周向).
+ *
+ * 角度加减 (只在规划里用摄像头值做一次, 不再分段各纠一次):
+ *   1) 自旋角 θ1 = (β − ψ_cam) * ADJ_SPIN_SIGN
+ *      → 从当前航向 ψ 转到对角线 β (ψ=0 且 ax≠0 时退化为旧轴向歪头 β)
+ *   2) 斜行 L = |ax|/sin|β| * ADJ_AXIAL_L_K  (ax 只进长度, 不加成角度)
+ *      斜行周向分量 s_circ = L * cos|β| (mm, 沿 Move+ 方向)
+ *   3) 摆正 θ2 = (0 − β) * ADJ_SPIN_SIGN = −β*ADJ_SPIN_SIGN
+ *   4) 周向指令 mm:  dφ_cam − s_circ
+ *      即 φ 角先换成弧长再减斜行带上的周向; 等价于
+ *      φ_cmd_deg 层面: φ_cam − (s_circ / R / MV_SIGN)*(180/π)
+ *   ax≈0: 无斜行, θ=(0−ψ)*SIGN, 再 Move(dφ_cam) — 与旧「只纠航向+周向」一致.
+ * Settle 只插在真实运动段之后. */
 typedef enum {
-  ADJ_FSM_GATE_AX = 0,   /* 判轴向是否超阈值 */
-  ADJ_FSM_AXIAL,         /* 轴向斜行修正 */
-  ADJ_FSM_SPIN,          /* 原地自旋纠航向 psi */
-  ADJ_FSM_MOVE,          /* 沿管壁走弧长纠周向 phi */
+  ADJ_FSM_GATE_AX = 0,   /* 兼容旧遥测/日志枚举值, 规划已改为顺序融合 */
+  ADJ_FSM_AXIAL,
+  ADJ_FSM_SPIN,
+  ADJ_FSM_MOVE,
   ADJ_FSM_DONE
 } ADJ_FSM_E;
 
-/* 规划器入口: 三个偏差量 → 全部纠偏运动; 返回 0完成 1中止 2出错
- * 状态机在一次调用内跑完, 母机/App 协议不变 */
+/* 规划器入口: 三个偏差量 → 融合运动; 返回 0完成 1中止 2出错
+ * 一次调用内跑完, 母机/App 协议不变; 步完成后仍回 REDY 可复测 */
 uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
-  /* 限幅已按用户要求去掉: 视觉/测试给多少就按多少执行(仍保留死区) */
   float phi = phi_deg * ADJ_DEMO_GAIN;
   float psi = psi_deg * ADJ_DEMO_GAIN;
   float ax  = ax_mm;
-  float dphi;
   uint8_t rc = 0;
+  float beta_deg, beta_rad, L, s_circ, dphi_mm, remain_mm, th;
+  uint8_t did_move = 0;
 
   Clear_All_PID();
   if(fabsf(phi) < ADJ_TOL_PHI) phi = 0;
   if(fabsf(psi) < ADJ_TOL_PSI) psi = 0;
   if(fabsf(ax)  < ADJ_TOL_AX)  ax  = 0;
-  dphi = phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN;
   {
     char lb[52];
     snprintf(lb, sizeof(lb), "start in %d/%d/%d -> %d/%d/%d",
@@ -1300,55 +1314,87 @@ uint8_t Adj_Execute(float phi_deg, float psi_deg, float ax_mm){
     Adj_Log(lb);
   }
 
+  dphi_mm = phi * ADJ_PI / 180.0f * ADJ_PIPE_R_MM * (float)ADJ_MV_SIGN;
+
   if(ax != 0.0f){
-    /* 融合规划: 轴向并进一次斜行, 航向只进第一段转角, 周向扣掉斜行投影
-     * Spin(β-ψ) -> Move(L) -> Spin(-β) -> Move(dphi - L*cosβ)
-     * 几何: L*sinβ=|ax| (轴向到位); L*cosβ = 斜行多走的周向, 末段扣回
-     * 两段转角之和 (β-ψ)+(-β) = -ψ, 顺带把航向纠回目标切向 */
-    float beta   = ADJ_DIAG_BETA_DEG * ADJ_PI / 180.0f;
-    float L      = fabsf(ax) / sinf(beta) * ADJ_AXIAL_L_K;
-    float bsign  = (ax > 0.0f ? 1.0f : -1.0f) * (float)ADJ_AXIAL_SIGN;
-    float beta_s = bsign * beta;
-    float psi_r  = psi * ADJ_PI / 180.0f * (float)ADJ_SPIN_SIGN;
-    float th1    = (beta_s - psi_r) * 180.0f / ADJ_PI;
-    float th2    = -beta_s * 180.0f / ADJ_PI;
-    float dres   = dphi - L * cosf(beta);
+    /* --- 有轴向: 转到 β → 斜行 L → 摆正到 0 → 一次周向(φ−斜行周向) --- */
+    beta_deg = (ax > 0.0f ? 1.0f : -1.0f) * (float)ADJ_AXIAL_SIGN * ADJ_DIAG_BETA_DEG;
+    beta_rad = fabsf(beta_deg) * ADJ_PI / 180.0f;
+    L = fabsf(ax) / sinf(beta_rad) * ADJ_AXIAL_L_K;
+    s_circ = L * cosf(beta_rad);          /* Move(+L) 带上的周向 mm */
+    remain_mm = dphi_mm - s_circ;        /* 摄像头周向弧长 − 斜行周向 */
+
     {
       char lb[52];
-      snprintf(lb, sizeof(lb), "axfu ax%d L%d t1%d t2%d",
-               (int)ax, (int)L, (int)th1, (int)th2);
+      snprintf(lb, sizeof(lb), "fuse b%d L%d sc%d r%d",
+               (int)beta_deg, (int)L, (int)s_circ, (int)remain_mm);
       Adj_Log(lb);
     }
-    rc = Adj_Spin(th1);   if(rc) goto out;
-    if(Adj_Settle()){ rc = 1; goto out; }
-    rc = Adj_Move(+L);    if(rc) goto out;
-    if(Adj_Settle()){ rc = 1; goto out; }
-    rc = Adj_Spin(th2);   if(rc) goto out;
-    if(Adj_Settle()){ rc = 1; goto out; }
-    rc = Adj_Move(dres);  if(rc) goto out;
+
+    /* 1) 航向: β − ψ_cam */
+    th = (beta_deg - psi) * (float)ADJ_SPIN_SIGN;
     {
       char lb[52];
-      snprintf(lb, sizeof(lb), "axfu2 d%d/%d", (int)dres, (int)g_adj_last_mm);
+      snprintf(lb, sizeof(lb), "sp1 th%d (b-ps)", (int)th);
       Adj_Log(lb);
+    }
+    rc = Adj_Spin(th);
+    if(rc) goto adj_done;
+    did_move = 1;
+    if(Adj_Settle()){ rc = 1; goto adj_done; }
+
+    /* 2) 斜行 */
+    rc = Adj_Move(+L);
+    if(rc) goto adj_done;
+    if(Adj_Settle()){ rc = 1; goto adj_done; }
+
+    /* 3) 摆正到 ψ=0: 0 − β */
+    th = (0.0f - beta_deg) * (float)ADJ_SPIN_SIGN;
+    {
+      char lb[52];
+      snprintf(lb, sizeof(lb), "sp2 th%d (0-b)", (int)th);
+      Adj_Log(lb);
+    }
+    rc = Adj_Spin(th);
+    if(rc) goto adj_done;
+    if(Adj_Settle()){ rc = 1; goto adj_done; }
+
+    /* 4) 更新后的周向 (不再单独加一次摄像头 φ) */
+    if(fabsf(remain_mm) >= 0.5f){
+#if ADJ_MOVE_TIMED
+      rc = Adj_MoveTimed(remain_mm);
+#else
+      rc = Adj_Move(remain_mm);
+#endif
+      if(rc) goto adj_done;
     }
   } else {
-    /* 无轴向: 先纠航向再纠周向 */
+    /* --- 无轴向: 只 (0−ψ) 自旋 + 摄像头周向 --- */
     if(psi != 0.0f){
-      rc = Adj_Spin(-psi * (float)ADJ_SPIN_SIGN);
-      if(rc) goto out;
+      th = (0.0f - psi) * (float)ADJ_SPIN_SIGN;
+      {
+        char lb[52];
+        snprintf(lb, sizeof(lb), "sp0 th%d (0-ps)", (int)th);
+        Adj_Log(lb);
+      }
+      rc = Adj_Spin(th);
+      if(rc) goto adj_done;
+      did_move = 1;
+      if(Adj_Settle()){ rc = 1; goto adj_done; }
     }
-    if(Adj_Settle()){ rc = 1; goto out; }
-    if(phi != 0.0f){
+    if(fabsf(dphi_mm) >= 0.5f){
 #if ADJ_MOVE_TIMED
-      rc = Adj_MoveTimed(dphi);
+      rc = Adj_MoveTimed(dphi_mm);
 #else
-      rc = Adj_Move(dphi);
+      rc = Adj_Move(dphi_mm);
 #endif
-      if(rc) goto out;
+      if(rc) goto adj_done;
+    } else if(!did_move){
+      /* 三量都在死区: 不空等 Settle */
     }
   }
 
-out:
+adj_done:
   motor_STOP();
   {
     char lb[52];

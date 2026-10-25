@@ -24,9 +24,29 @@
     GRIPPER:       0x1B,
     AVOID_RUN:     0x1C,
     COOP_ABORT:    0x1D,
+    ALIGN_VISION_START: 0x22,
+    ALIGN_VISION_STOP:  0x23,
+    ALIGN_TUNE:         0x24,
+    ALIGN_STEP:         0x25,
+    ALIGN_CAM_CTL:      0x26,
     TEST_START:    0x30,
     TEST_ADJ:      0x31,
     TEST_STOP:     0x32
+  };
+
+  /* 真实视觉闭环: 状态帧 0x88 / 视觉 JSON 0x89 */
+  var ALIGN_STATE_CMD = 0x88;
+  var ALIGN_JSON_CMD  = 0x89;
+  var ALIGN_STATE_LEN = 11;
+  var ALIGN_STATE_TEXT = {
+    0: '空闲', 1: '启动摄像头', 2: '启动测试', 3: '等子机就绪',
+    4: '视觉测量', 5: '下发偏差', 6: '等子机执行', 7: '已完成',
+    8: '超时', 9: '视觉侧失败', 10: '子机侧失败', 11: '已停止'
+  };
+  var ALIGN_RC_TEXT = {
+    0: '', 1: 'K230 未记参考位', 2: 'K230 未开始', 3: '未识别到码',
+    4: '需要两个码', 5: 'HTTP 失败', 6: '达最大轮次', 7: '总超时',
+    8: '子机无响应', 9: '用户停止', 10: '完成'
   };
 
   var CAN_SUB = { ENABLE: 0, DISABLE: 1, SET_ZERO: 2 };
@@ -151,6 +171,35 @@
     return { state: f.payload[0], round: f.payload[1], lastRc: f.payload[2] };
   }
 
+  /* 0x88: [state][iter][rc][phi i16×100][psi i16×100][ax i16][aligned][maxIter] */
+  function parseAlignState(frame) {
+    var f = parseFrame(frame);
+    if (!f || f.cmd !== ALIGN_STATE_CMD || f.payload.length < ALIGN_STATE_LEN) return null;
+    var p = f.payload;
+    var dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    return {
+      state: p[0],
+      iter: p[1],
+      rc: p[2],
+      phi: dv.getInt16(3, true) / 100,
+      psi: dv.getInt16(5, true) / 100,
+      ax: dv.getInt16(7, true),
+      aligned: !!p[9],
+      maxIter: p[10],
+      stateText: ALIGN_STATE_TEXT[p[0]] || ('状态' + p[0]),
+      rcText: ALIGN_RC_TEXT[p[2]] || ''
+    };
+  }
+
+  /* 0x89: 视觉原始 JSON 文本 */
+  function parseAlignJson(frame) {
+    var f = parseFrame(frame);
+    if (!f || f.cmd !== ALIGN_JSON_CMD) return null;
+    var text = '';
+    for (var i = 0; i < f.payload.length; i++) text += String.fromCharCode(f.payload[i]);
+    return text;
+  }
+
   function uint8ArrayToHex(bytes) {
     var out = [];
     for (var i = 0; i < bytes.length; i++) {
@@ -173,6 +222,12 @@
     buildFrame: buildFrame,
     parseFrame: parseFrame,
     parseState: parseState,
+    ALIGN_STATE_CMD: ALIGN_STATE_CMD,
+    ALIGN_JSON_CMD: ALIGN_JSON_CMD,
+    ALIGN_STATE_TEXT: ALIGN_STATE_TEXT,
+    ALIGN_RC_TEXT: ALIGN_RC_TEXT,
+    parseAlignState: parseAlignState,
+    parseAlignJson: parseAlignJson,
     TEST_TELEM_CMD: TEST_TELEM_CMD,
     TEST_STATE_CMD: TEST_STATE_CMD,
     parseTestTelem: parseTestTelem,
@@ -229,7 +284,51 @@
     },
     avoidRun: function (val) { return buildFrame(CMD.AVOID_RUN, new Uint8Array([val & 0xFF])); },
     autoAlign: function () { return buildFrame(CMD.AUTO_ALIGN, null); },
-    alignEstop: function () { return buildFrame(CMD.ALIGN_ESTOP, null); }
+    alignEstop: function () { return buildFrame(CMD.ALIGN_ESTOP, null); },
+
+    /* 真实视觉闭环 */
+    alignVisionStart: function (ip, gainPct, maxIter, flags) {
+      var oct = String(ip || '').trim().split('.');
+      if (oct.length !== 4) return null;
+      var p = new Uint8Array(7);
+      for (var i = 0; i < 4; i++) {
+        var v = parseInt(oct[i], 10);
+        if (isNaN(v) || v < 0 || v > 255) return null;
+        p[i] = v;
+      }
+      p[4] = gainPct & 0xFF;
+      p[5] = maxIter & 0xFF;
+      p[6] = flags & 0xFF;
+      return buildFrame(CMD.ALIGN_VISION_START, p);
+    },
+    alignVisionStop: function () { return buildFrame(CMD.ALIGN_VISION_STOP, null); },
+    alignTune: function (signPhi, signPsi, signAx, betaDeg, speedPct) {
+      var i8 = function (v) { return (v < 0 ? 256 + (v & 0xFF) : v) & 0xFF; };
+      return buildFrame(CMD.ALIGN_TUNE, new Uint8Array([
+        i8(signPhi), i8(signPsi), i8(signAx), betaDeg & 0xFF, speedPct & 0xFF
+      ]));
+    },
+    alignStep: function (which, phi, psi, ax) {
+      var p = new Uint8Array(13);
+      p[0] = which & 0xFF;
+      var dv = new DataView(p.buffer);
+      dv.setFloat32(1, phi, true);
+      dv.setFloat32(5, psi, true);
+      dv.setFloat32(9, ax, true);
+      return buildFrame(CMD.ALIGN_STEP, p);
+    },
+    alignCamCtl: function (action, ip) {
+      var oct = String(ip || '').trim().split('.');
+      if (oct.length !== 4) return null;
+      var p = new Uint8Array(5);
+      p[0] = action & 0xFF;
+      for (var i = 0; i < 4; i++) {
+        var v = parseInt(oct[i], 10);
+        if (isNaN(v) || v < 0 || v > 255) return null;
+        p[i + 1] = v;
+      }
+      return buildFrame(CMD.ALIGN_CAM_CTL, p);
+    }
   };
 
   global.Protocol = Protocol;

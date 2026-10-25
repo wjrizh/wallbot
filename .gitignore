@@ -51,3 +51,9 @@ Netlist_Schematic1_2026-09-22.tel
 摄像头子机/*.bin
 摄像头子机/*.elf
 摄像头子机/*.map
+
+# IDE 状态 / Python 缓存
+.ligong/
+.marscode/
+__pycache__/
+*.pyc

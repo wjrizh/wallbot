@@ -99,6 +99,10 @@
       if (telem) { self._emit('testTelem', telem); return; }
       var tstate = global.Protocol.parseTestState(bytes);
       if (tstate) { self._emit('testState', tstate); return; }
+      var astate = global.Protocol.parseAlignState(bytes);
+      if (astate) { self._emit('alignState', astate); return; }
+      var ajson = global.Protocol.parseAlignJson(bytes);
+      if (ajson !== null && ajson !== undefined) { self._emit('alignJson', ajson); return; }
     };
 
     ws.onclose = function (ev) {

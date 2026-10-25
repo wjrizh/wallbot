@@ -148,4 +148,34 @@
 #define AVOID_WAIT_MS      1000
 #define AVOID_TRIM         3
 
+/* ===== 真实视觉纠偏闭环 (align_vision) =====
+ * App 0x22 启动, 母机周期拉 K230 /align/once, 经 TestMode 下发 ADJ 帧给子机。
+ * 复用 test_mode 的 NRF 收发时序, 不直接操作 RF24。 */
+#define AV_TASK_PERIOD_MS     50      /* 状态机节拍 */
+#define AV_POLL_MS            500     /* 两次 /align/once 最小间隔 */
+#define AV_HTTP_TIMEOUT_MS    8000    /* K230 共识最多 5s, 留裕量 */
+#define AV_CAM_START_WAIT_MS  12000   /* /align/start 后的等待上限 */
+#define AV_TEST_READY_WAIT_MS 8000    /* 等子机 TSTB 上限 */
+#define AV_MAX_ITER           30      /* 默认轮次安全上限 (App 不传时) */
+#define AV_SAFETY_MAX_ITER    50      /* 轮次绝对上限: 防振荡/不收敛死循环 */
+#define AV_TOTAL_TIMEOUT_MS   600000  /* 闭环总时限 10min (30 轮留余量) */
+#define AV_HTTP_FAIL_MAX      3       /* 连续 HTTP 失败次数上限 */
+#define AV_ALIGNED_HITS       2       /* aligned 连续命中次数判收敛 */
+#define AV_DONE_TIMEOUT_MS    70000   /* 等子机 DONE 上限 (TestMode 内部 60s) */
+#define AV_CMD_MAX_PHI        10.0f   /* 单轮命令限幅 */
+#define AV_CMD_MAX_PSI        10.0f
+#define AV_CMD_MAX_AX         30.0f
+/* 原始偏差收敛容差(未缩放): 不随增益变化。K230 的 aligned(4°/20mm)先触发,
+   这里 2°/10mm 是防 K230 aligned 失效的兜底, 平时轮不到 */
+#define AV_RAW_TOL_PHI        2.0f
+#define AV_RAW_TOL_PSI        2.0f
+#define AV_RAW_TOL_AX         10.0f
+/* 子机最小可动命令: 缩放后低于此值轮子不动, 抬到最小量防止空转烧轮次。
+   ⚠ 占位值待实机标定 (给 0.5° 转不转/给 1° 转不转)。
+   安全约束: 必须小于对应 AV_RAW_TOL_*, 只对超容差轴抬升, 最坏在容差内过调 */
+#define AV_CMD_MIN_PHI        0.8f
+#define AV_CMD_MIN_PSI        0.8f
+#define AV_CMD_MIN_AX         3.0f
+#define AV_DEFAULT_GAIN_PCT   30      /* 默认 0.3 倍缩放, 首测安全 */
+
 #endif

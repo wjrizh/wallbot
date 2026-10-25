@@ -17,7 +17,7 @@
 #include "laser_tof.h"
 #include "avoid_mode.h"
 #include "imu_driver.h"
-#include "align_bridge.h"
+#include "align_vision.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
@@ -33,8 +33,8 @@ static void Task_PushLaser(void *pvParameters) {
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
         WebServer_PushLaser();
         WebServer_PushTestStatus();
+        WebServer_PushAlignState();   /* 0x88 真实视觉闭环状态 */
         WebServer_Tick();   /* WiFi 掉线自动重连 */
-        AlignBridge_Tick();   /* 视觉纠偏闭环 (HTTP 拉取, 内部按 500ms 节流) */
     }
 }
 
@@ -115,7 +115,11 @@ void setup() {
     JoypadSender_Init();
     AutoMode_Init();
     TestMode_Init();
-xTaskCreate(JoypadSender_Task, "JoypadSend", 4096, NULL, 2, NULL);
+    xTaskCreate(JoypadSender_Task, "JoypadSend", 4096, NULL, 2, NULL);
+
+    /* 4.10 真实视觉纠偏闭环 (HTTP 拉 K230 /align/once + TestMode 下发) */
+    AlignVision_Init();
+    xTaskCreate(AlignVision_Task, "AlignVision", 8192, NULL, 1, NULL);
 
     /* 6. 推送任务 */
     xTaskCreate(Task_PushLaser, "PushLaser", 4096, NULL, 1, NULL);

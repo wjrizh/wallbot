@@ -1106,3 +1106,39 @@ body.align-open .seg{right:412px;}
 
 .at-real{margin-top:16px;font-size:13px;color:#8e8e93;}
 .at-real summary{cursor:pointer;padding:6px 0;}
+
+/* ==================== 真实视觉闭环面板 (紧凑布局) ==================== */
+/* 原面板直接复用全局 .btn(52px/18px) 塞进窄行导致溢出, 这里改小号专用按钮 */
+.align-row{flex-wrap:wrap;}
+.align-row .align-k{white-space:nowrap;}
+.align-row .align-v{
+  min-width:0;flex:1 1 auto;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.align-row .debug-input{
+  flex:1 1 90px;min-width:0;max-width:170px;
+  height:36px;font-size:15px;text-align:left;padding:0 10px;
+}
+.align-row .at-form-k{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;font-size:13px;}
+.align-row select.debug-input{text-align:center;padding:0 6px;}
+
+.av-btns{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px;}
+.av-btn{
+  appearance:none;border:none;border-radius:8px;
+  height:36px;padding:0 12px;
+  font-size:13px;font-weight:600;line-height:1;
+  color:var(--text);background:rgba(118,118,128,.16);
+  cursor:pointer;white-space:nowrap;
+  flex:0 1 auto;min-width:0;
+  transition:transform .07s ease,opacity .12s ease;
+}
+.av-btn:active{transform:scale(.97);opacity:.85;}
+.av-btn-primary{background:var(--blue);color:#fff;}
+.av-btn-danger{background:var(--red);color:#fff;}
+.av-btn-ok{background:var(--green);color:#fff;}
+
+.av-chk{
+  display:inline-flex;align-items:center;gap:4px;
+  font-size:13px;color:#8e8e93;white-space:nowrap;
+}
+.av-chk input{margin:0;width:16px;height:16px;}

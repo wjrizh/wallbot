@@ -31,6 +31,7 @@
     this._discovering = false;
     this._discoverTimer = null;
     this._camGiveUp = {};
+    this._rediscoverCount = 0;
   }
 
   App.prototype.init = function () {
@@ -287,15 +288,26 @@
     if (this._discoverTimer) clearTimeout(this._discoverTimer);
     this._discoverTimer = setTimeout(function () {
       self._discoverTimer = null;
-      /* 母机 WS 在线, 或任一路摄像头画面仍在, 都不该盲目重扫:
-       * 重扫会重建整个发现流程, 把正在工作的子机 IP 一起搅乱。 */
+      /* 三路设备(母机 WS / 母机摄像头 / 子机摄像头)任一缺失都要补扫.
+       * 不能因为子机画面已在就收工, 否则母机永远连不上。
+       * 加次数上限, 避免设备真的不存在时无限广播。 */
       var cam = self._cameraModule();
-      var camActive = cam && cam.channels && cam.channels.some(function (ch) {
-        return !!ch.img;
-      });
-      if (self.transport.isOnline() || camActive) return;
-      UI.log('[发现] 缓存地址未连通, 重新扫描');
-      self._autoDiscover('缓存失效');
+      var needHost = !self.transport.isOnline();
+      var needCamHost = !!(cam && !cam.getIp('host'));
+      var needChild = !!(cam && !cam.getIp('child'));
+      if (!needHost && !needCamHost && !needChild) {
+        self._rediscoverCount = 0;
+        return;
+      }
+      if ((self._rediscoverCount || 0) >= 30) {
+        UI.log('[发现] 连续重扫未见新增设备, 暂停自动重扫');
+        return;
+      }
+      self._rediscoverCount = (self._rediscoverCount || 0) + 1;
+      UI.log('[发现] 设备不齐(母机' + (needHost ? '缺' : '有') +
+             ' 母机摄像头' + (needCamHost ? '缺' : '有') +
+             ' 子机' + (needChild ? '缺' : '有') + '), 重新扫描');
+      self._autoDiscover('补齐设备');
     }, delay);
   };
 
@@ -368,10 +380,19 @@
       cam.connect();
     }
     this._syncHostInputs();
+    /* 只要还有设备没被发现就继续重扫: 母机先应答、K230 慢一拍是常态,
+     * 不能因为收到母机就收工, 否则子机摄像头地址永远补不上。 */
+    var missing = !this.transport.isOnline() ||
+                  (cam && (!cam.getIp('host') || !cam.getIp('child')));
     if (!host && !res.camHost && !res.camChild) {
       UI.log('[发现] 未收到任何设备应答, 2s 后重试');
       this._scheduleDiscoverFallback(2000);
-    } else if (this.transport.isOnline()) {
+    } else if (missing) {
+      UI.log('[发现] 仍有设备未发现, 3s 后重扫');
+      this._scheduleDiscoverFallback(3000);
+    } else {
+      /* 设备齐了: 重置重扫计数, 之前的失败不累积到下次 */
+      this._rediscoverCount = 0;
       this._clearDiscoverTimer();
     }
   };

@@ -19,8 +19,8 @@
   var STATE_TEXT = { 0: "空闲", 1: "发 TSTA", 2: "等 TSTB", 3: "就绪", 4: "发 ADJ", 5: "执行中", 6: "发 TSTE" };
 
   /* 迭代纠偏: 必须与固件 main.c 的常数一致, 否则扣减的剩余量算错 */
-  var ADJ_PIPE_R_MM = 300.0;   /* ADJ_PIPE_R_MM */
-  var ADJ_TRACK_MM  = 100.0;   /* ADJ_TRACK_MM  */
+  var ADJ_PIPE_R_MM = 250.0;   /* 实测管半径 2026-10, 与子机固件一致 */
+  var ADJ_TRACK_MM  = 145.0;   /* 实测轮距 2026-10, 与子机固件一致 */
   var ADJ_TOL_PHI   = 0.5;     /* ADJ_TOL_PHI   */
   var ADJ_TOL_PSI   = 0.5;     /* ADJ_TOL_PSI   */
   var ADJ_TOL_AX    = 2.0;     /* ADJ_TOL_AX    */
@@ -55,6 +55,9 @@
 
     /* 迭代纠偏: on=开关, active=进行中, phi/psi/ax=当前剩余偏差, n=已完成轮次 */
     this._iter = { on: false, active: false, phi: 0, psi: 0, ax: 0, n: 0 };
+
+    /* 监视: App 直连 K230 轮询 /align/get 刷新实测偏差 (人手推车观察用) */
+    this._mon = { on: false, timer: null, fails: 0 };
   }
 
   /* ==================== 挂载 ==================== */
@@ -67,11 +70,30 @@
       entry.addEventListener("click", function () { self.open(); });
     }
     this._build();
+    var cam = this.app && this.app.camera;
+    if (cam && typeof cam.onIpChange === "function") {
+      cam.onIpChange(function (key, ip) {
+        if (key !== "child") return;
+        self._onVisionIp(ip);
+      });
+    }
     if (this.app && this.app.transport) {
       this.app.transport.on("testTelem", function (t) { self._onTelem(t); });
       this.app.transport.on("testState", function (s) { self._onTestState(s); });
+      this.app.transport.on("alignState", function (s) { self._onAlignState(s); });
+      this.app.transport.on("alignJson", function (j) { self._onAlignJson(j); });
     }
     this._startAnim();
+  };
+
+  /* K230 即子机摄像头: 优先用 UDP 自动发现写入的地址, 其次上次手动填的 */
+  AlignModule.prototype._resolveVisionIp = function () {
+    var cam = this.app && this.app.camera;
+    var ip = cam && cam.getIp ? (cam.getIp("child") || "") : "";
+    if (!ip) {
+      try { ip = (global.localStorage && global.localStorage.getItem("wallbot.k230Ip")) || ""; } catch (e) { ip = ""; }
+    }
+    return ip;
   };
 
   AlignModule.prototype._el = function (tag, cls, text) {
@@ -204,29 +226,84 @@
     this._logEl = logBox;
     body.appendChild(logBox);
 
-    /* ---- 真实摄像头（折叠） ---- */
-    var det = document.createElement("details");
-    det.className = "at-real";
-    det.appendChild(this._el("summary", null, "真实摄像头（未就绪，点开可手动填 IP）"));
-    var ipRow = this._el("div", "align-row");
-    ipRow.appendChild(this._el("span", "align-k", "子机 IP"));
-    var ipInp = document.createElement("input");
-    ipInp.type = "text";
-    ipInp.className = "debug-input";
-    ipInp.style.maxWidth = "170px";
-    var cam = this.app && this.app.camera ? this.app.camera : null;
-    ipInp.placeholder = (cam && cam.getIp("child")) || "未发现";
-    ipInp.value = (cam && cam.getIp("child")) || "";
-    this._ipInput = ipInp;
-    ipRow.appendChild(ipInp);
-    det.appendChild(ipRow);
-    var btnPoll = this._el("button", "btn btn-gray btn-wide", "拉取 /align/get");
-    btnPoll.addEventListener("click", function () { self._pollReal(); });
-    det.appendChild(btnPoll);
-    this._realOut = this._el("div", "align-log");
-    this._realOut.textContent = "--";
-    det.appendChild(this._realOut);
-    body.appendChild(det);
+    /* ---- ⑤ 真实视觉闭环（K230 = 子机摄像头, IP 取自自动发现） ---- */
+    body.appendChild(this._el("div", "debug-section-title", "⑤ 真实视觉闭环（K230）"));
+
+    var vIpRow = this._el("div", "align-row");
+    vIpRow.appendChild(this._el("span", "align-k", "视觉板 IP"));
+    this._vIpEl = this._el("span", "align-v", this._resolveVisionIp() || "自动发现中…");
+    vIpRow.appendChild(this._vIpEl);
+    body.appendChild(vIpRow);
+
+    var vGainRow = this._el("div", "align-row");
+    vGainRow.appendChild(this._el("span", "align-k", "增益%"));
+    var vGain = document.createElement("input");
+    vGain.type = "number"; vGain.className = "debug-input"; vGain.value = "30";
+    vGain.style.maxWidth = "70px";
+    this._vGain = vGain;
+    vGainRow.appendChild(vGain);
+    vGainRow.appendChild(this._el("span", "align-k", " 轮次上限"));
+    var vIter = document.createElement("input");
+    vIter.type = "number"; vIter.className = "debug-input"; vIter.value = "30";
+    vIter.style.maxWidth = "60px";
+    this._vIter = vIter;
+    vGainRow.appendChild(vIter);
+    body.appendChild(vGainRow);
+
+    var vSignRow = this._el("div", "align-row");
+    vSignRow.appendChild(this._el("span", "align-k", "符号"));
+    var mkSign = function (label, def) {
+      var s = document.createElement("select");
+      s.className = "debug-input";
+      s.style.maxWidth = "70px";
+      ["+", "-"].forEach(function (v) {
+        var o = document.createElement("option");
+        o.value = v === "+" ? "1" : "-1";
+        o.textContent = label + v;
+        s.appendChild(o);
+      });
+      s.value = String(def);
+      return s;
+    };
+    this._vSPhi = mkSign("φ", 1);
+    this._vSPsi = mkSign("ψ", 1);
+    this._vSAx  = mkSign("ax", 1);
+    vSignRow.appendChild(this._vSPhi);
+    vSignRow.appendChild(this._vSPsi);
+    vSignRow.appendChild(this._vSAx);
+    var btnTune = this._el("button", "av-btn av-btn-ok", "写入标定");
+    btnTune.addEventListener("click", function () { self._sendTune(); });
+    vSignRow.appendChild(btnTune);
+    body.appendChild(vSignRow);
+
+    var vCtrlRow = this._el("div", "av-btns");
+    var mkBtn = function (label, fn, cls) {
+      var b = self._el("button", "av-btn " + (cls || ""), label);
+      b.addEventListener("click", fn);
+      return b;
+    };
+    vCtrlRow.appendChild(mkBtn("开始闭环", function () { self._startVision(); }, "av-btn-primary"));
+    vCtrlRow.appendChild(mkBtn("记参考", function () { self._camRef(); }));
+    this._vMonBtn = mkBtn("监视: 关", function () { self._toggleMonitor(); });
+    vCtrlRow.appendChild(this._vMonBtn);
+    vCtrlRow.appendChild(mkBtn("停止", function () { self._stopVision(); }, "av-btn-danger"));
+    body.appendChild(vCtrlRow);
+
+    var vStatusRow = this._el("div", "align-row");
+    vStatusRow.appendChild(this._el("span", "align-k", "闭环状态"));
+    this._vStateEl = this._el("span", "align-v", "空闲");
+    vStatusRow.appendChild(this._vStateEl);
+    body.appendChild(vStatusRow);
+
+    var vErrRow = this._el("div", "align-row");
+    vErrRow.appendChild(this._el("span", "align-k", "实测偏差"));
+    this._vErrEl = this._el("span", "align-v", "—");
+    vErrRow.appendChild(this._vErrEl);
+    body.appendChild(vErrRow);
+
+    this._vJsonEl = this._el("div", "align-log");
+    this._vJsonEl.textContent = "--";
+    body.appendChild(this._vJsonEl);
 
     drawer.appendChild(head);
     drawer.appendChild(body);
@@ -411,20 +488,182 @@
     this._stageEl.innerHTML = html.length ? html.join("") : "<div class='at-stage-row'>暂无</div>";
   };
 
-  AlignModule.prototype._pollReal = function () {
+  /* ==================== 真实视觉闭环 ==================== */
+
+  AlignModule.prototype._vIpValue = function () {
+    return this._resolveVisionIp();
+  };
+
+  /* 自动发现到子机(=K230)地址时刷新显示 */
+  AlignModule.prototype._onVisionIp = function (ip) {
+    if (!this._vIpEl) return;
+    this._vIpEl.textContent = ip || "自动发现中…";
+  };
+
+  AlignModule.prototype._startVision = function () {
+    var ip = this._vIpValue();
+    if (!ip) { this._log("未发现视觉板, 等自动发现或主页填子机 IP", true); return; }
+    /* 闭环结束后自动恢复监视 (闭环期间必须停, 避免与 /align/once 抢 K230) */
+    this._mon.resumeAfterVision = this._mon.on;
+    if (this._mon.on) {
+      this._stopMonitor();
+      this._log("已停止监视, 闭环结束后自动恢复");
+    }
+    var gain = parseInt(this._vGain.value, 10);
+    if (isNaN(gain)) gain = 30;
+    var iter = parseInt(this._vIter.value, 10);
+    if (isNaN(iter)) iter = 30;
+    if (iter < 1) iter = 1;
+    /* 只带 0x02 开摄像头, 不带 0x04 结束关摄像头: 关流后 WebView 对 MJPEG
+       正常断开不一定触发 img.onerror, 画面会永久卡死只能重启 App */
+    var frame = global.Protocol.alignVisionStart(ip, gain, iter, 0x02);
+    if (!frame) { this._log("IP 格式错误", true); return; }
+    this._send(frame, "ALIGN_VISION_START ip=" + ip + " gain=" + gain + "% 轮次上限=" + iter);
+    /* 闭环期间子机流出帧慢是正常的, 不计失败不清 IP */
+    var cam = this.app && this.app.camera;
+    if (cam && typeof cam.setDetectMode === "function") cam.setDetectMode("child", true);
+  };
+
+  AlignModule.prototype._stopVision = function () {
+    var cam = this.app && this.app.camera;
+    if (cam && typeof cam.setDetectMode === "function") cam.setDetectMode("child", false);
+    this._send(global.Protocol.alignVisionStop(), "ALIGN_VISION_STOP");
+  };
+
+  /* 记参考位: 0x26 action=3, 需要视觉板 IP */
+  AlignModule.prototype._camRef = function () {
+    var ip = this._vIpValue();
+    if (!ip) { this._log("未发现视觉板, 等自动发现或主页填子机 IP", true); return; }
+    var frame = global.Protocol.alignCamCtl(3, ip);
+    if (!frame) { this._log("IP 格式错误", true); return; }
+    if (!this._send(frame, "ALIGN_CAM_CTL 记参考 ip=" + ip)) return;
+    /* 母机同步 GET /align/ref (K230 共识最多 5s): 先本地清零,
+       1.5s 后开监视取真值; 若参考未落地, 轮询先显示未记参考/旧值, 落地后自愈 */
+    this._setErrText(0, 0, 0, true);
+    this._tgt.phi = 0; this._tgt.psi = 0; this._tgt.ax = 0;
     var self = this;
-    var ip = this._ipInput ? this._ipInput.value.trim() : "";
-    if (!ip) { this._realOut.textContent = "未填 IP"; return; }
-    var url = "http://" + ip.replace(/^https?:\/\//, "").replace(/\/.*$/, "") + "/align/get";
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", url, true);
-    xhr.timeout = 3000;
-    xhr.onload = function () {
-      self._realOut.textContent = xhr.responseText || "(空)";
-    };
-    xhr.onerror = function () { self._realOut.textContent = "请求失败"; };
-    xhr.ontimeout = function () { self._realOut.textContent = "超时"; };
-    try { xhr.send(); } catch (e) { self._realOut.textContent = "异常 " + e.message; }
+    if (this._mon.on) this._stopMonitor();
+    this._log("记参考已下发, 1.5s 后开始监视");
+    setTimeout(function () { self._startMonitor(); }, 1500);
+  };
+
+  /* ---------- 监视: App 直连 K230 轮询 /align/get ---------- */
+
+  AlignModule.prototype._monUrl = function () {
+    var ip = this._vIpValue();
+    return ip ? "http://" + ip + "/align/get" : "";
+  };
+
+  AlignModule.prototype._setErrText = function (phi, psi, ax, aligned) {
+    if (!this._vErrEl) return;
+    this._vErrEl.textContent = "φ " + Number(phi).toFixed(2) + "°  ψ " +
+      Number(psi).toFixed(2) + "°  ax " + Number(ax).toFixed(0) + "mm" +
+      (aligned ? "  已对齐" : "");
+  };
+
+  AlignModule.prototype._setErrHint = function (txt) {
+    if (this._vErrEl) this._vErrEl.textContent = txt;
+  };
+
+  AlignModule.prototype._toggleMonitor = function () {
+    if (this._mon.on) this._stopMonitor();
+    else this._startMonitor();
+  };
+
+  AlignModule.prototype._startMonitor = function () {
+    if (this._mon.on) return;
+    if (!this._monUrl()) { this._log("未发现视觉板, 无法监视", true); return; }
+    this._mon.on = true;
+    this._mon.fails = 0;
+    if (this._vMonBtn) this._vMonBtn.textContent = "监视: 开";
+    if (this._vStateEl) this._vStateEl.textContent = "监视中";
+    this._log("开始监视 /align/get (300ms)");
+    this._pollOnce();
+  };
+
+  AlignModule.prototype._stopMonitor = function () {
+    this._mon.on = false;
+    if (this._mon.timer) { clearTimeout(this._mon.timer); this._mon.timer = null; }
+    if (this._vMonBtn) this._vMonBtn.textContent = "监视: 关";
+    if (this._vStateEl) this._vStateEl.textContent = "空闲";
+  };
+
+  AlignModule.prototype._pollOnce = function () {
+    var self = this;
+    if (!this._mon.on) return;
+    var url = this._monUrl();
+    if (!url) { this._stopMonitor(); return; }
+
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var to = setTimeout(function () { if (ctrl) ctrl.abort(); }, 1500);
+
+    fetch(url, { cache: "no-store", signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) { return r.text(); })
+      .then(function (txt) {
+        clearTimeout(to);
+        if (!self._mon.on) return;
+        self._mon.fails = 0;
+        if (self._vJsonEl) self._vJsonEl.textContent = txt;
+        var j = null;
+        try { j = JSON.parse(txt); } catch (e) { j = null; }
+        if (j && j.ok) {
+          self._setErrText(j.phi_deg, j.psi_deg, j.axial_mm, j.aligned);
+          self._tgt.phi = j.phi_deg;
+          self._tgt.psi = j.psi_deg;
+          self._tgt.ax = j.axial_mm;
+        } else if (j && j.reason) {
+          if (j.reason === "no_ref") self._setErrHint("未记参考");
+          else if (j.reason === "not_running") self._setErrHint("K230 摄像头未运行(先开子机视频流)");
+          else self._setErrHint("无有效标签: " + j.reason);
+        }
+      })
+      .catch(function () {
+        clearTimeout(to);
+        if (!self._mon.on) return;
+        self._mon.fails++;
+        if (self._mon.fails >= 5) {
+          self._log("连续 5 次拉取失败, 停止监视", true);
+          self._stopMonitor();
+        }
+      })
+      .then(function () {
+        if (self._mon.on) self._mon.timer = setTimeout(function () { self._pollOnce(); }, 300);
+      });
+  };
+
+  AlignModule.prototype._sendTune = function () {
+    var sPhi = parseInt(this._vSPhi.value, 10);
+    var sPsi = parseInt(this._vSPsi.value, 10);
+    var sAx  = parseInt(this._vSAx.value, 10);
+    var frame = global.Protocol.alignTune(sPhi, sPsi, sAx, 20, 100);
+    this._send(frame, "ALIGN_TUNE sign=" + sPhi + "/" + sPsi + "/" + sAx);
+  };
+
+  AlignModule.prototype._onAlignState = function (s) {
+    if (!this._vStateEl) return;
+    var txt = s.stateText + (s.rcText ? " · " + s.rcText : "");
+    this._vStateEl.textContent = txt + "  (" + s.iter + "/" + s.maxIter + ")";
+    this._vErrEl.textContent = "φ " + s.phi.toFixed(2) + "°  ψ " + s.psi.toFixed(2) +
+                               "°  ax " + s.ax + "mm" + (s.aligned ? "  已对齐" : "");
+    /* 同步可视化 */
+    this._tgt.phi = s.phi;
+    this._tgt.psi = s.psi;
+    this._tgt.ax  = s.ax;
+    /* 终态(7收敛/8超时/9视觉失败/10子机失败/11用户停止):
+       解除子机流检测模式保护; 闭环前在监视的话自动恢复 */
+    if (s.state >= 7) {
+      var cam = this.app && this.app.camera;
+      if (cam && typeof cam.setDetectMode === "function") cam.setDetectMode("child", false);
+      if (this._mon.resumeAfterVision) {
+        this._mon.resumeAfterVision = false;
+        var self = this;
+        setTimeout(function () { self._startMonitor(); }, 1000);
+      }
+    }
+  };
+
+  AlignModule.prototype._onAlignJson = function (j) {
+    if (this._vJsonEl) this._vJsonEl.textContent = j;
   };
 
   /* ==================== 动画 ==================== */

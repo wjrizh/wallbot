@@ -1,8 +1,9 @@
 /*
  * modules/camera.js - 双路摄像头 MJPEG 回传
  * 说明: 通过 <img src="http://<ip>:81/stream"> 直接拉取 MJPEG 流.
- *   母机 = #cameraCard / #cameraBadge  (OV3660, 10.32.7.214)
- *   子机 = #cameraCard2 / #cameraBadge2 (GC2145, 10.32.7.215)
+ *   母机 = #cameraCard / #cameraBadge   (ESP32-S3 OV3660, role=host)
+ *   子机 = #cameraCard2 / #cameraBadge2 (K230 CanMV, role=camchild, :81/stream)
+ *   K230 有人拉流会自动开摄像头, 不需要先调 /align/start
  *   wallbot.camera.connect()    // 两路同时连接
  *   wallbot.camera.disconnect() // 两路同时断开
  */

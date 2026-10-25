@@ -19,7 +19,6 @@
 #include "gripper.h"
 #include "avoid_mode.h"
 #include "child_cmd.h"
-#include "align_bridge.h"
 #include <Arduino.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
@@ -275,19 +274,6 @@ void Protocol_ProcessFrame(const uint8_t* data, uint16_t len) {
             Serial.println("[CMD] 子机直通清空");
             break;
         }
-        /* 0x22: 启动视觉纠偏闭环, payload: 摄像头子机 IP (4 字节) */
-        case 0x22: {
-            if (pay_len < 4 || !p) { code = 1; break; }
-            if (AutoMode_IsActive()) { code = 1; break; }
-            AlignBridge_Start(p);
-            break;
-        }
-        /* 0x23: 停止视觉纠偏闭环 */
-        case 0x23: {
-            AlignBridge_Stop();
-            Serial.println("[CMD] 视觉纠偏停止");
-            break;
-        }
         default: {
             code = 3;   /* 未知命令 */
             break;
@@ -332,6 +318,5 @@ void Imu_CalibrateOnce(void) {
 
 void Protocol_Init(void) {
     ChildCmd_Init();
-    AlignBridge_Init();
     Serial.println("[PROTO] 协议模块初始化完成");
 }

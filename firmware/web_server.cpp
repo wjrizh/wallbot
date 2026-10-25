@@ -23,6 +23,7 @@
 #include "imu_driver.h"
 #include "laser_tof.h"
 #include "test_mode.h"
+#include "align_vision.h"
 
 static void onTestTelemetry(const uint8_t* f, uint8_t len);
 
@@ -251,9 +252,47 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
                 TestMode_Stop();
                 break;
             }
+            /* ===== 真实视觉闭环 (align_vision) ===== */
+            /* 0x22 启动: ip[4] gainPct maxIter flags */
+            case 0x22: {
+                if (pay_len < 4 || !p) { code = 1; break; }
+                if (AlignVision_IsActive()) { code = 1; break; }
+                uint8_t gain = (pay_len >= 5) ? p[4] : AV_DEFAULT_GAIN_PCT;
+                uint8_t iter = (pay_len >= 6) ? p[5] : AV_MAX_ITER;
+                uint8_t flags = (pay_len >= 7) ? p[6] : (AV_FLAG_START_CAM | AV_FLAG_STOP_CAM);
+                if (!AlignVision_Start(p, gain, iter, flags)) { code = 1; break; }
+                break;
+            }
+            /* 0x23 停止 */
+            case 0x23: {
+                AlignVision_Stop();
+                break;
+            }
+            /* 0x24 标定: signPhi signPsi signAx betaDeg speedPct */
+            case 0x24: {
+                if (pay_len < 5 || !p) { code = 1; break; }
+                AlignVision_SetTune((int8_t)p[0], (int8_t)p[1], (int8_t)p[2], p[3], p[4]);
+                break;
+            }
+            /* 0x25 单步: which(1) + phi f32 + psi f32 + ax f32 */
+            case 0x25: {
+                if (pay_len < 13 || !p) { code = 1; break; }
+                float phi, psi, ax;
+                memcpy(&phi, &p[1], 4);
+                memcpy(&psi, &p[5], 4);
+                memcpy(&ax,  &p[9], 4);
+                if (!AlignVision_Step(p[0], phi, psi, ax)) { code = 1; break; }
+                break;
+            }
+            /* 0x26 视觉侧控制: action(1) + ip[4] */
+            case 0x26: {
+                if (pay_len < 5 || !p) { code = 1; break; }
+                if (!AlignVision_CamCtl(p[0], &p[1])) { code = 1; break; }
+                break;
+            }
             /* ===== NRF手柄 + 子母协同 → 协议模块 (内部已回执) ===== */
             case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1D:
-            case 0x20: case 0x21: case 0x22: case 0x23: {
+            case 0x20: case 0x21: {
                 Protocol_ProcessFrame(data, len);
                 acked = true;
                 break;
@@ -436,6 +475,38 @@ void WebServer_SendLog(const char* msg) {
     frame[2] = 0x83;
     frame[3] = (uint8_t)len;
     memcpy(&frame[4], msg, len);
+    uint16_t crc = crc16(frame, 4 + len);
+    frame[4 + len] = crc & 0xFF;
+    frame[5 + len] = (crc >> 8) & 0xFF;
+    ws.binaryAll(frame, 6 + len);
+}
+
+/* 0x88: 真实视觉闭环状态 */
+void WebServer_PushAlignState(void) {
+    if (ws.count() == 0) return;
+    uint8_t pay[11];
+    AlignVision_GetStatus(pay);
+    uint8_t frame[2 + 1 + 1 + 11 + 2];
+    frame[0] = 0xAA; frame[1] = 0x55;
+    frame[2] = 0x88;
+    frame[3] = 11;
+    memcpy(&frame[4], pay, 11);
+    uint16_t crc = crc16(frame, 15);
+    frame[15] = crc & 0xFF;
+    frame[16] = (crc >> 8) & 0xFF;
+    ws.binaryAll(frame, 17);
+}
+
+/* 0x89: 视觉原始 JSON */
+void WebServer_PushAlignJson(const char* json) {
+    if (ws.count() == 0 || !json) return;
+    size_t len = strlen(json);
+    if (len > 200) len = 200;
+    uint8_t frame[2 + 1 + 1 + 200 + 2];
+    frame[0] = 0xAA; frame[1] = 0x55;
+    frame[2] = 0x89;
+    frame[3] = (uint8_t)len;
+    memcpy(&frame[4], json, len);
     uint16_t crc = crc16(frame, 4 + len);
     frame[4 + len] = crc & 0xFF;
     frame[5 + len] = (crc >> 8) & 0xFF;
