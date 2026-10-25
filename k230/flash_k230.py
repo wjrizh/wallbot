@@ -20,14 +20,33 @@ CHUNK = 384            # 每块原始字节数 (base64 后约 512 字符)
 BAUD = 115200
 
 
-def find_port():
+def find_port(explicit=None):
+    if explicit:
+        return explicit
+    env = os.environ.get('K230_PORT') or os.environ.get('FLASH_PORT')
+    if env:
+        return env
+    try:
+        from serial.tools import list_ports
+        coms = []
+        for info in list_ports.comports():
+            h = (info.hwid or '').upper()
+            d = (info.description or '').upper()
+            if '1209:ABD1' in h or 'ABD1' in h or 'KENDRYTE' in h or 'CANMV' in d:
+                return info.device
+            if (info.device or '').upper().startswith('COM'):
+                coms.append(info.device)
+        if coms:
+            return coms[0]
+    except Exception:
+        pass
     for pat in ('/dev/serial/by-id/*Kendryte*', '/dev/serial/by-id/*CanMV*'):
         hits = glob.glob(pat)
         if hits:
             return os.path.realpath(hits[0])
-    for p in ('/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0', '/dev/ttyUSB1'):
-        if os.path.exists(p):
-            return p
+    for pth in ('/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0', '/dev/ttyUSB1'):
+        if os.path.exists(pth):
+            return pth
     raise SystemExit('未找到 K230 串口 (检查 USB 线/是否已枚举)')
 
 
@@ -79,10 +98,28 @@ def exec_raw(ser, code, timeout=10.0):
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else 'k230/dual_tag_align_web.py'
-    dst = sys.argv[2] if len(sys.argv) > 2 else '/sdcard/main.py'
+    # Usage: flash_k230.py [src.py] [dst|/sdcard/main.py] [COMx]
+    # Also: env K230_PORT / FLASH_PORT
+    src = 'k230/dual_tag_align_web.py'
+    dst = '/sdcard/main.py'
+    port_arg = None
+    args = sys.argv[1:]
+    if len(args) >= 1:
+        a0 = args[0]
+        if a0.upper().startswith('COM') or a0.startswith('/dev/'):
+            port_arg = a0
+        else:
+            src = a0
+    if len(args) >= 2:
+        a1 = args[1]
+        if a1.upper().startswith('COM') or a1.startswith('/dev/'):
+            port_arg = a1
+        else:
+            dst = a1
+    if len(args) >= 3:
+        port_arg = args[2]
     data = open(src, 'rb').read()
-    port = find_port()
+    port = find_port(port_arg)
     print('端口 %s' % port)
     print('烧录 %s (%d B) -> %s' % (src, len(data), dst))
 

@@ -119,8 +119,8 @@
 #define ALIGN_HTTP_TIMEOUT_MS    1500
 #define ALIGN_PSI_K              0.60f  /* spin = -K * psi_deg */
 #define ALIGN_AXIAL_K            0.80f  /* speed = -K * axial_mm/10 */
-#define ALIGN_PSI_DEAD_DEG       3.0f   /* 死区 (夹爪 5° 留裕量) */
-#define ALIGN_AXIAL_DEAD_MM      8.0f
+#define ALIGN_PSI_DEAD_DEG       0.5f   /* 死区 (夹爪 5° 留裕量) */
+#define ALIGN_AXIAL_DEAD_MM      2.0f
 #define ALIGN_SPIN_MAX           60     /* spin 限幅 (子机 int8 指令域) */
 #define ALIGN_SPEED_MAX          60
 
@@ -165,11 +165,11 @@
 #define AV_CMD_MAX_PHI        10.0f   /* 单轮命令限幅 */
 #define AV_CMD_MAX_PSI        10.0f
 #define AV_CMD_MAX_AX         30.0f
-/* 原始偏差收敛容差(未缩放): 不随增益变化。K230 的 aligned(4°/20mm)先触发,
-   这里 2°/10mm 是防 K230 aligned 失效的兜底, 平时轮不到 */
-#define AV_RAW_TOL_PHI        2.0f
-#define AV_RAW_TOL_PSI        2.0f
-#define AV_RAW_TOL_AX         10.0f
+/* 原始偏差收敛容差(未缩放): 不随增益变化。K230 侧 aligned(0.5°/2mm)先触发;
+   这里 0.5°/2mm 与 K230/子机 ADJ 对齐, 是防 K230 aligned 失效的兜底 */
+#define AV_RAW_TOL_PHI        0.5f
+#define AV_RAW_TOL_PSI        0.5f
+#define AV_RAW_TOL_AX         2.0f
 /* 子机最小可动命令: 缩放后低于此值轮子不动, 抬到最小量防止空转烧轮次。
    ⚠ 占位值待实机标定 (给 0.5° 转不转/给 1° 转不转)。
    安全约束: 必须小于对应 AV_RAW_TOL_*, 只对超容差轴抬升, 最坏在容差内过调 */
