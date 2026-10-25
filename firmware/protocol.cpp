@@ -238,11 +238,7 @@ void Protocol_ProcessFrame(const uint8_t* data, uint16_t len) {
             if (key != 0) Joypad_PressKey(key);
             break;
         }
-        /* 0x19: 启动子母协同 */
-        case 0x19: {
-            AutoMode_StartCoop();
-            break;
-        }
+        /* 0x19 已移至 web_server (带 K230 ip[4] payload, 注入 CoopVision) */
         /* 0x1D: 协同中止 */
         case 0x1D: {
             AutoMode_Abort();

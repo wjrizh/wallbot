@@ -61,10 +61,14 @@
 
   CoopModule.prototype.run = function (action) {
     var build = Protocol[action.method];
-    var frame = typeof build === 'function' ? build() : null;
-    if (!frame) { UI.log('未知协同动作: ' + action.method, true); return; }
+    if (typeof build !== 'function') { UI.log('未知协同动作: ' + action.method, true); return; }
+    /* 启动协同附带视觉板地址 (自动发现的 K230), 母机注入 CoopVision 并持久化;
+       没有地址也照发, 母机用上次保存的 */
+    var ip = '';
+    try { ip = (this.app.camera && this.app.camera.getIp('child')) || ''; } catch (e) {}
+    var frame = action.method === 'coopStart' ? build(ip) : build();
     var sent = this.app.transport.send(frame);
-    UI.log(action.label + (sent ? '' : ' (未发送)'), !sent);
+    UI.log(action.label + (ip ? ' (视觉板 ' + ip + ')' : ' (无视觉板地址, 用母机缓存)'), !sent);
     if (sent) UI.toast(action.toast);
   };
 

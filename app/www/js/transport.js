@@ -95,10 +95,6 @@
       if (ack) { self._emit('ack', ack); return; }
       var logMsg = global.Protocol.parseLog(bytes);
       if (logMsg) { self._emit('log', '[固件] ' + logMsg); return; }
-      var telem = global.Protocol.parseTestTelem(bytes);
-      if (telem) { self._emit('testTelem', telem); return; }
-      var tstate = global.Protocol.parseTestState(bytes);
-      if (tstate) { self._emit('testState', tstate); return; }
       var astate = global.Protocol.parseAlignState(bytes);
       if (astate) { self._emit('alignState', astate); return; }
       var ajson = global.Protocol.parseAlignJson(bytes);

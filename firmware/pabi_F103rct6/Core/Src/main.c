@@ -412,8 +412,8 @@ void PID_IMU(float u_roll , int M_V_nomal)
 }
 
 uint8_t GO_FLAG = 0;
-/* 视觉纠偏状态: 母机经NRF发 ADJ,<phi>,<psi>,<ax> (执行器见 Adj_Execute) */
-static volatile uint8_t g_adj_armed = 0;   /* 本周期收到过ADJ帧=启用视觉纠偏 */
+/* 视觉纠偏: 母机经NRF发 ADJ,<phi>,<psi>,<ax> (执行器见 Adj_Execute);
+ * 协同流程 REDY② 后无条件进入纠偏等待, 不再需要 armed 门控 */
 static volatile float g_adj_phi = 0.0f, g_adj_psi = 0.0f, g_adj_ax = 0.0f;
 /* USER CODE END PV */
 
@@ -520,16 +520,10 @@ void DUO_Motor_OFF(void){
 #define REDY_RSP  "REDY"
 #define DONE_RSP  "DONE"
 #define ACKD_RSP  "ACKD"
-#define ADJ_CMD   "ADJ,"        /* 纠偏帧: ADJ,<phi>,<psi>,<ax> (含ADJ,0,0,0使能) */
+#define ADJ_CMD   "ADJ,"        /* 纠偏帧: ADJ,<phi>,<psi>,<ax> */
 #define ADJ_WAIT_MS  180000u    /* 纠偏等待总时限(ms), 超时视为母机失联 */
 #define COOP_IMU_PERIOD_MS  200u
-#define TSTA_CMD  "TSTA"   /* 母->子: 进入视觉纠偏测试 */
-#define TSTB_RSP  "TSTB"   /* 子->母: 测试就绪 */
-#define TSTE_CMD  "TSTE"   /* 母->子: 退出测试 */
-
-static uint8_t g_test_mode = 0;
-static uint8_t g_coop_prefetched = 0;
-static volatile uint8_t g_tsta_pending = 0;   /* 外层收到 TSTA, 待 Test_WaitLoop 消费 */
+static uint8_t g_coop_prefetched = 0;   /* 主循环手动态预取到 COOP, 交给 AUTO() 消费 */
 
 /* 解析 ADJ, 帧载荷 → 存入 g_adj_* */
 static void Adj_ParseStore(const uint8_t *buf){
@@ -675,8 +669,7 @@ static uint8_t Coop_IsProtoFrame(const uint8_t *buf){
   return (uint8_t)(Coop_FindFrame(buf, COOP_CMD) || Coop_FindFrame(buf, GOON_CMD) ||
                    Coop_FindFrame(buf, LOCK_CMD) || Coop_FindFrame(buf, STOP_CMD) ||
                    Coop_FindFrame(buf, REDY_RSP) || Coop_FindFrame(buf, DONE_RSP) ||
-                   Coop_FindFrame(buf, ACKD_RSP) || Coop_FindFrame(buf, ADJ_CMD) ||
-                   Coop_FindFrame(buf, TSTA_CMD) || Coop_FindFrame(buf, TSTE_CMD));
+                   Coop_FindFrame(buf, ACKD_RSP) || Coop_FindFrame(buf, ADJ_CMD));
 }
 
 /* 1=中止并写入 Arr_RX; STOP 清摇杆, 遥控帧原样拷贝 */
@@ -686,12 +679,8 @@ static uint8_t Coop_TakeAbort(const uint8_t *buf){
     printf("STOP received\r\n");
     return 1;
   }
-  if(Coop_FindFrame(buf, ADJ_CMD)){
-    Adj_ParseStore(buf);        /* 纠偏帧: 记录偏差量+置armed, 不构成中止 */
-    return 0;
-  }
   if(Coop_IsProtoFrame(buf)){
-    return 0;
+    return 0;                   /* 协议帧(含ADJ)不构成中止, 各等待循环自己消费 */
   }
   /* Align/Test: fan KEY 3+/4-/6 stop with axes 0 — adjust PWM, do not abort ADJ */
   if(buf[1] == 0 && buf[2] == 0 &&
@@ -891,7 +880,6 @@ void AUTO(void){
     DUO_PWM_SET = 500-1;
     DUO_Motor_OFF();
     g_coop_report_en = 0;
-    g_adj_armed = 0;   /* 新周期: 重置纠偏武装, 母机发ADJ帧再使能 */
     if(g_coop_prefetched){
       g_coop_prefetched = 0;
       printf("AUTO start (COOP prefetched)\r\n");
@@ -930,12 +918,11 @@ void AUTO(void){
     if(GO_UP(roll_Compose)) { g_coop_report_en = 0; motor_STOP(); return; }
     motor_STOP();
 
-    /* 视觉纠偏等待: 本周期收过ADJ帧才启用; 先发REDY告知母机"GO_UP结束,可开始视觉纠偏";
- * 母机发GOON(对齐)才发DONE */
-    if(g_adj_armed){
-      Coop_SendFrame(REDY_RSP);   /* REDY②: GO_UP结束, 通知母机启动视觉纠偏 */
-      if(Adj_WaitLoop()){ g_coop_report_en = 0; motor_STOP(); return; }  /* 中止/超时: 不发DONE */
-    }
+    /* 视觉纠偏: GO_UP 结束即通知母机开始纠偏 (REDY②);
+     * 母机发 GOON(对齐确认) 后才发 DONE */
+    Coop_SendFrame(REDY_RSP);   /* REDY②: GO_UP结束, 通知母机启动视觉纠偏 */
+    printf("AUTO: send REDY2, wait vision\r\n");
+    if(Adj_WaitLoop()){ g_coop_report_en = 0; motor_STOP(); return; }  /* 中止/超时: 不发DONE */
 
     g_coop_report_en = 0;
     Coop_SendFrame(DONE_RSP);
@@ -1422,7 +1409,7 @@ static uint8_t Adj_WaitLoop(void){
     Coop_ReportIMU();
     if(safe_RxPacket(buf) == 0){
       if(Coop_FindFrame(buf, GOON_CMD)){
-        printf("ADJ aligned\r\n");
+        printf("ADJ aligned, exit wait\r\n");
         return 0;                                   /* 对齐: 调用方发DONE */
       }
       if(Coop_FindFrame(buf, ADJ_CMD)){
@@ -1441,76 +1428,6 @@ static uint8_t Adj_WaitLoop(void){
     if(HAL_GetTick() - t0 > ADJ_WAIT_MS){
       printf("ADJ wait timeout\r\n");
       return 2;
-    }
-  }
-}
-/* ============ 视觉纠偏测试模式 (地面调试, 不开风机) ============
- * 母->子: TSTA 进入 / ADJ,<phi>,<psi>,<ax> / TSTE 退出 / STOP 中止
- * 子->母: TSTB 就绪 / DONE 本轮完毕 / 'J' 遥测
- * 返回: 0=未进入(主循环跑 AUTO) 1=测试已退出
- * 正常 COOP 帧被预取, 交给 AUTO() 继续 */
-static uint8_t Test_WaitLoop(void){
-  uint8_t buf[32];
-  if(!g_tsta_pending){
-  printf("TEST wait: TSTA for test, COOP for AUTO\r\n");
-  NRF24L01_Write_Reg(FLUSH_RX, 0xff);
-  while(1){
-    if(safe_RxPacket(buf) == 0){
-      if(Coop_FindFrame(buf, TSTA_CMD)){
-        printf("TSTA received, enter test\r\n");
-        break;
-      }
-      if(Coop_FindFrame(buf, COOP_CMD)){
-        printf("COOP received, run AUTO\r\n");
-        g_coop_prefetched = 1;
-        return 0;
-      }
-      if(Coop_TakeAbort(buf)){
-        printf("TEST abort before start\r\n");
-        return 0;
-      }
-    }
-  }
-  }
-
-  g_tsta_pending = 0;
-  g_test_mode = 1;
-  Coop_SendFrame(TSTB_RSP);
-  NRF24L01_Write_Reg(FLUSH_RX, 0xff);
-
-  while(1){
-    if(safe_RxPacket(buf) == 0){
-      if(Coop_FindFrame(buf, TSTA_CMD)){
-        Coop_SendFrame(TSTB_RSP);
-        continue;
-      }
-      if(Coop_FindFrame(buf, TSTE_CMD)){
-        printf("TSTE received, exit test\r\n");
-        g_test_mode = 0;
-        motor_STOP();
-        return 1;
-      }
-      if(Coop_FindFrame(buf, ADJ_CMD)){
-        uint8_t rc;
-        Adj_ParseStore(buf);
-        printf("TEST ADJ phi=%d psi=%d ax=%d\r\n",
-               (int)g_adj_phi, (int)g_adj_psi, (int)g_adj_ax);
-        rc = Adj_Execute(g_adj_phi, g_adj_psi, g_adj_ax);
-        if(rc == 1){
-          printf("TEST exec aborted\r\n");
-          g_test_mode = 0;
-          return 1;
-        }
-        Coop_SendFrame(DONE_RSP);
-        NRF24L01_Write_Reg(FLUSH_RX, 0xff);
-        continue;
-      }
-      if(Coop_TakeAbort(buf)){
-        printf("TEST abort\r\n");
-        g_test_mode = 0;
-        motor_STOP();
-        return 1;
-      }
     }
   }
 }
@@ -1723,12 +1640,10 @@ int main(void)
   {
     if(PI_LINK_EN) Pi_CMD_Process();   /* 处理树莓派串口指令(PI_LINK_EN=0时停用) */
 
-    /* AUTO/测试模式: 接收由 Test_WaitLoop/AUTO 内部独占, 外层不得抢 RX FIFO */
+    /* 协同模式: 接收由 AUTO() 内部独占, 外层不得抢 RX FIFO */
     if(MODE == 10){
-      if(Test_WaitLoop() == 0){
-        AUTO();
-      }
-      /* 中止退出: 保持吸力, 切手操; key=6 在此停风机 */
+      AUTO();
+      /* 中止/正常退出: 保持吸力, 切手操; key=6 在此停风机 */
       MODE = 9;
       g_coop_report_en = 0;
       motor_STOP();
@@ -1740,9 +1655,9 @@ int main(void)
     }
 
     if(safe_RxPacket((uint8_t *)Arr_RX)==0){
-        /* 手动模式下收到 TSTA: 请求进入测试 */
-        if(Coop_FindFrame((const uint8_t *)Arr_RX, TSTA_CMD)){
-          g_tsta_pending = 1;
+        /* 手动模式下收到 COOP: 进入协同 (帧已预取, 由 AUTO() 消费) */
+        if(Coop_FindFrame((const uint8_t *)Arr_RX, COOP_CMD)){
+          g_coop_prefetched = 1;
           MODE = 10;
           memset(Arr_RX, 0, 32);
           continue;

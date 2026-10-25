@@ -14,6 +14,11 @@ void AutoMode_StartCoop(void);
 void AutoMode_Abort(void);
 void AutoMode_Tick(void);
 
+/* 填 0x88 状态帧 11 字节 payload (web_server 周期推送调用)
+ * [0]=CV状态(0-6)/200=协同非视觉阶段 [1]=纠偏轮次 [2]=rc(恒0)
+ * [3..4]=phi*100 [5..6]=psi*100 [7..8]=ax [9]=aligned [10]=轮次上限 */
+void AutoMode_FillVisionStatus(uint8_t out[11]);
+
 bool AutoMode_WantsSendFrame(uint8_t* out_buf, uint8_t* out_len);
 void AutoMode_OnFrameSent(void);
 

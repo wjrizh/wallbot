@@ -3,7 +3,6 @@
 #include "nrf_sender.h"
 #include "auto_mode.h"
 #include "child_cmd.h"
-#include "test_mode.h"
 #include "config.h"
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -61,7 +60,8 @@ void JoypadSender_Task(void *pvParameters) {
         buf[5] = last_key;
 
         if (AutoMode_IsActive()) {
-            uint8_t fbuf[4]; uint8_t flen = 0;
+            /* 协同帧最长 21 字节 (ADJ,-10.0,-10.0,-30.0), 缓冲必须够大 */
+            uint8_t fbuf[32]; uint8_t flen = 0;
             if (AutoMode_WantsSendFrame(fbuf, &flen)) {
                 NRF_StopListening();
                 NRF_SendFrame(fbuf, flen);
@@ -73,34 +73,18 @@ void JoypadSender_Task(void *pvParameters) {
         }
 
         /* 协同已退出但仍有遗留帧 (如 STOP) 待发, 优先发出 */
-        uint8_t fbuf[4]; uint8_t flen = 0;
+        uint8_t fbuf[32]; uint8_t flen = 0;
         if (AutoMode_WantsSendFrame(fbuf, &flen)) {
             NRF_StopListening();
             NRF_SendFrame(fbuf, flen);
             AutoMode_OnFrameSent();
         }
 
-        /* 视觉纠偏测试帧 (TSTA / ADJ / TSTE): 最高优先 */
-        uint8_t tbuf[32]; uint8_t tlen = 0;
-        if (TestMode_WantsSendFrame(tbuf, &tlen)) {
-            /* 带重试: 子机回 TSTB/发遥测时会短暂切 TX, 单发易收不到 ACK */
-            NRF_SendFrameRetry(tbuf, tlen, 4);
-            TestMode_OnFrameSent();
-        }
-
-        /* 子机指令直通 (App 按键 / 视觉纠偏): 优先于虚拟手柄帧 */
+        /* 子机指令直通 (App 按键): 优先于虚拟手柄帧 */
         uint8_t child_frame[32];
         if (ChildCmd_Pop(child_frame)) {
             NRF_StopListening();
             NRF_SendFrame(child_frame, sizeof(child_frame));
-        }
-
-        /* 测试模式: 保持 RX 监听等 TSTB/DONE, 不发摇杆帧抢占 */
-        if (TestMode_IsActive()) {
-            NRF_StartListening();
-            TestMode_Tick();
-            vTaskDelayUntil(&xLastWakeTime, period);
-            continue;
         }
 
         NRF_StopListening();

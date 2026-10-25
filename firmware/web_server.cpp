@@ -22,10 +22,8 @@
 #include "gripper.h"
 #include "imu_driver.h"
 #include "laser_tof.h"
-#include "test_mode.h"
-#include "align_vision.h"
-
-static void onTestTelemetry(const uint8_t* f, uint8_t len);
+#include "auto_mode.h"
+#include "coop_vision.h"
 
 bool g_imu_online = false;
 static uint8_t g_imu_fail_count = 0;
@@ -231,67 +229,21 @@ static void onWsEvent(AsyncWebSocket *s, AsyncWebSocketClient *client,
                 GaitEngine_ConfirmNext();
                 break;
             }
-            /* ===== 视觉纠偏测试 (无摄像头, 假偏差下发) ===== */
-            /* 0x30 开始测试 */
-            case 0x30: {
-                TestMode_Start();
+            /* 0x19 启动协同: 可带 K230 ip[4] (App 自动发现结果, 母机 NVS 持久化;
+               无 payload 时用上次保存的地址) */
+            case 0x19: {
+                if (pay_len >= 4 && p) CoopVision_SetBase(p);
+                AutoMode_StartCoop();
                 break;
             }
-            /* 0x31 下发假偏差: phi(4 floatLE) psi(4) ax(4) */
-            case 0x31: {
-                if (pay_len < 12 || !p) { code = 1; break; }
-                float phi, psi, ax;
-                memcpy(&phi, &p[0], 4);
-                memcpy(&psi, &p[4], 4);
-                memcpy(&ax,  &p[8], 4);
-                TestMode_SendAdj(phi, psi, ax);
-                break;
-            }
-            /* 0x32 结束测试 */
-            case 0x32: {
-                TestMode_Stop();
-                break;
-            }
-            /* ===== 真实视觉闭环 (align_vision) ===== */
-            /* 0x22 启动: ip[4] gainPct maxIter flags */
-            case 0x22: {
-                if (pay_len < 4 || !p) { code = 1; break; }
-                if (AlignVision_IsActive()) { code = 1; break; }
-                uint8_t gain = (pay_len >= 5) ? p[4] : AV_DEFAULT_GAIN_PCT;
-                uint8_t iter = (pay_len >= 6) ? p[5] : AV_MAX_ITER;
-                uint8_t flags = (pay_len >= 7) ? p[6] : (AV_FLAG_START_CAM | AV_FLAG_STOP_CAM);
-                if (!AlignVision_Start(p, gain, iter, flags)) { code = 1; break; }
-                break;
-            }
-            /* 0x23 停止 */
-            case 0x23: {
-                AlignVision_Stop();
-                break;
-            }
-            /* 0x24 标定: signPhi signPsi signAx betaDeg speedPct */
+            /* 0x24 视觉纠偏标定: signPhi signPsi signAx betaDeg speedPct */
             case 0x24: {
                 if (pay_len < 5 || !p) { code = 1; break; }
-                AlignVision_SetTune((int8_t)p[0], (int8_t)p[1], (int8_t)p[2], p[3], p[4]);
-                break;
-            }
-            /* 0x25 单步: which(1) + phi f32 + psi f32 + ax f32 */
-            case 0x25: {
-                if (pay_len < 13 || !p) { code = 1; break; }
-                float phi, psi, ax;
-                memcpy(&phi, &p[1], 4);
-                memcpy(&psi, &p[5], 4);
-                memcpy(&ax,  &p[9], 4);
-                if (!AlignVision_Step(p[0], phi, psi, ax)) { code = 1; break; }
-                break;
-            }
-            /* 0x26 视觉侧控制: action(1) + ip[4] */
-            case 0x26: {
-                if (pay_len < 5 || !p) { code = 1; break; }
-                if (!AlignVision_CamCtl(p[0], &p[1])) { code = 1; break; }
+                CoopVision_SetTune((int8_t)p[0], (int8_t)p[1], (int8_t)p[2], p[3], p[4]);
                 break;
             }
             /* ===== NRF手柄 + 子母协同 → 协议模块 (内部已回执) ===== */
-            case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1D:
+            case 0x18: case 0x1A: case 0x1B: case 0x1D:
             case 0x20: case 0x21: {
                 Protocol_ProcessFrame(data, len);
                 acked = true;
@@ -336,8 +288,6 @@ void WebServer_Init(void) {
 
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
-
-    TestMode_SetTelemetrySink(onTestTelemetry);
 
     /* 只保存 WS 通道, 无内部页：网页根路径回应数据 */
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -435,37 +385,6 @@ void WebServer_PushLaser(void) {
     ws.binaryAll(frame, 38);
 }
 
-/* 子机轮子运动遥测 'J' -> App (0x86) */
-static void onTestTelemetry(const uint8_t* f, uint8_t len) {
-    if (ws.count() == 0) return;
-    uint8_t frame[2 + 1 + 1 + 32 + 2];
-    frame[0] = 0xAA; frame[1] = 0x55;
-    frame[2] = 0x86;
-    frame[3] = len;
-    memcpy(&frame[4], f, len);
-    uint16_t crc = crc16(frame, 4 + len);
-    frame[4 + len] = crc & 0xFF;
-    frame[5 + len] = (crc >> 8) & 0xFF;
-    ws.binaryAll(frame, 6 + len);
-}
-
-/* 测试状态帧 (0x87): [state][round][last_rc][buf] */
-void WebServer_PushTestStatus(void) {
-    if (ws.count() == 0) return;
-    uint8_t st, rd, rc;
-    TestMode_GetStatus(&st, &rd, &rc);
-    uint8_t pay[3] = {st, rd, rc};
-    uint8_t frame[2 + 1 + 1 + 3 + 2];
-    frame[0] = 0xAA; frame[1] = 0x55;
-    frame[2] = 0x87;
-    frame[3] = 3;
-    memcpy(&frame[4], pay, 3);
-    uint16_t crc = crc16(frame, 7);
-    frame[7] = crc & 0xFF;
-    frame[8] = (crc >> 8) & 0xFF;
-    ws.binaryAll(frame, 9);
-}
-
 void WebServer_SendLog(const char* msg) {
     if (ws.count() == 0) return;
     size_t len = strlen(msg);
@@ -481,11 +400,11 @@ void WebServer_SendLog(const char* msg) {
     ws.binaryAll(frame, 6 + len);
 }
 
-/* 0x88: 真实视觉闭环状态 */
+/* 0x88: 协同视觉纠偏状态 (auto_mode 填充) */
 void WebServer_PushAlignState(void) {
     if (ws.count() == 0) return;
     uint8_t pay[11];
-    AlignVision_GetStatus(pay);
+    AutoMode_FillVisionStatus(pay);
     uint8_t frame[2 + 1 + 1 + 11 + 2];
     frame[0] = 0xAA; frame[1] = 0x55;
     frame[2] = 0x88;
