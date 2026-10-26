@@ -126,9 +126,9 @@ void AutoMode_StartCoop(void) {
     g_cvAlignedHits = 0;
     g_refRetry = 0;
     g_measRetry = 0;
-    Serial.println("[COOP] 完整协同: PB9 160->70");
+    Serial.println("[COOP] 完整协同: PB9 160->60");
     WebServer_SendLog("[COOP] 协同启动");
-    Servo_SetPB9(70.0f, 2.0f);
+    Servo_SetPB9(60.0f, 2.0f);
     g_delay_deadline = millis() + 3000;
     g_cs = COOP_PB9_DOWN;
 }
@@ -248,7 +248,7 @@ void AutoMode_Tick(void) {
         break;
     case COOP_WAIT_REDY:
         if (recv_match(FRAME_REDY)) {
-            Serial.println("[COOP] 收到 REDY①, PB9 70->160");
+            Serial.println("[COOP] 收到 REDY①, PB9 60->160");
             NRF_StopListening();
             Servo_SetPB9(160.0f, 2.0f);
             g_delay_deadline = millis() + 3000;
@@ -391,9 +391,9 @@ void AutoMode_Tick(void) {
         break;
     case COOP_VISION_WAIT_DONE:
         if (recv_match(FRAME_DONE)) {
-            Serial.println("[COOP] 收 DONE, PB9 160->95");
+            Serial.println("[COOP] 收 DONE, PB9 160->80");
             NRF_StopListening();
-            Servo_SetPB9(95.0f, 2.0f);
+            Servo_SetPB9(80.0f, 2.0f);
             g_delay_deadline = millis() + 3000;
             g_cs = COOP_PB9_DOWN_2;
         } else if (millis() > g_waitDeadline) {
