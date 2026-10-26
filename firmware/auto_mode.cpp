@@ -51,10 +51,13 @@ static uint16_t g_cvIter = 0;
 static uint8_t  g_cvAlignedHits = 0;
 static uint8_t  g_refRetry = 0, g_measRetry = 0;
 
-/* 待发送帧 (最长 ADJ,-10.0,-10.0,-30.0 = 21 字节) */
+/* 待发送帧 (最长 ADJ,-10.0,-10.0,-30.0 = 21 字节)
+ * 发送成功才清 g_wants_send; 失败保留, 下周期继续补发直到成功 */
 static bool g_wants_send = false;
 static uint8_t g_send_buf[32] = {0};
 static uint8_t g_send_len = 0;
+static uint16_t g_txFailCount = 0;   /* 连续发送失败次数 */
+static uint8_t  g_alert = 0;        /* 0x88[2] 告警码, 见 auto_mode.h */
 
 /* 接收滑动窗口 */
 static uint8_t g_rx_buf[8] = {0};
@@ -126,8 +129,11 @@ void AutoMode_StartCoop(void) {
     g_cvAlignedHits = 0;
     g_refRetry = 0;
     g_measRetry = 0;
+    g_txFailCount = 0;
+    g_alert = 0;
+    g_wants_send = false;
     Serial.println("[COOP] 完整协同: PB9 160->60");
-    WebServer_SendLog("[COOP] 协同启动");
+    WebServer_SendLog("[COOP] 协同启动 → PB9下压");
     Servo_SetPB9(60.0f, 2.0f);
     g_delay_deadline = millis() + 3000;
     g_cs = COOP_PB9_DOWN;
@@ -148,37 +154,60 @@ void AutoMode_Abort(void) {
     CoopVision_Reset();
     g_cvIter = 0;
     g_cvAlignedHits = 0;
-    /* 通知子机中止: 帧先入队, 由发送任务下一次循环发出 */
+    g_txFailCount = 0;
+    if (g_alert == 0) g_alert = 6;   /* 人工/异常中止 */
+    /* 通知子机中止: 覆盖未发出的协同帧, 下周期补发 STOP 直到成功 */
     request_send(FRAME_STOP);
-    /* 立即回 IDLE, 不等 STOP 帧发送结果, 保证子机控制通道立刻可用 */
+    /* 立即回 IDLE, 保证子机控制通道立刻可用; STOP 仍由发送任务发出 */
     g_cs = COOP_IDLE;
     NRF_StopListening();
 }
 
 bool AutoMode_WantsSendFrame(uint8_t* out_buf, uint8_t* out_len) {
-    if (g_wants_send) {
-        memcpy(out_buf, g_send_buf, g_send_len);
-        *out_len = g_send_len;
-        g_wants_send = false;
-        return true;
-    }
-    return false;
+    if (!g_wants_send) return false;
+    memcpy(out_buf, g_send_buf, g_send_len);
+    *out_len = g_send_len;
+    return true;   /* 不消费: 成功后由 OnTxResult 清除 */
 }
 
-void AutoMode_OnFrameSent(void) {
+void AutoMode_OnTxResult(bool ok) {
     NRF_StartListening();
+    if (!ok) {
+        g_txFailCount++;
+        g_alert = 1;   /* NRF 补发中 */
+        if (g_txFailCount == 1 || (g_txFailCount % 50) == 0) {
+            char lb[72];
+            snprintf(lb, sizeof(lb), "[COOP] NRF发送失败,补发中 x%u",
+                     (unsigned)g_txFailCount);
+            Serial.println(lb);
+            WebServer_SendLog(lb);
+        }
+        return;   /* 保留 g_wants_send, 下周期再发 */
+    }
+    if (g_txFailCount > 0) {
+        char lb[72];
+        snprintf(lb, sizeof(lb), "[COOP] NRF发送成功(曾失败%u次)",
+                 (unsigned)g_txFailCount);
+        WebServer_SendLog(lb);
+    }
+    g_txFailCount = 0;
+    if (g_alert == 1) g_alert = 0;
+    g_wants_send = false;
     g_rx_idx = 0;
     memset(g_rx_buf, 0, 8);
-    /* 帧发送完成, 推进 SEND 状态到对应等待态, 并设等待超时 */
+    /* 帧发送成功, 推进 SEND 状态到对应等待态 */
     if (g_cs == COOP_SEND_COOP) {
         g_cs = COOP_WAIT_REDY;
-        g_waitDeadline = millis() + 10000;    /* 子机开机+风机 ~5s */
+        g_waitDeadline = millis() + 10000;
+        WebServer_SendLog("[COOP] 阶段: 等子机REDY①(风机就绪)");
     } else if (g_cs == COOP_SEND_GOON) {
         g_cs = COOP_WAIT_DONE;
-        g_waitDeadline = millis() + 120000;   /* 子机整个作业流程 */
+        g_waitDeadline = millis() + 120000;
+        WebServer_SendLog("[COOP] 阶段: 等子机作业完成(REDY②)");
     } else if (g_cs == COOP_SEND_LOCK) {
         g_cs = COOP_WAIT_ACKD;
         g_waitDeadline = millis() + 10000;
+        WebServer_SendLog("[COOP] 阶段: 等子机ACKD");
     } else if (g_cs == COOP_SEND_STOP) {
         g_cs = COOP_IDLE;
     }
@@ -233,6 +262,7 @@ void AutoMode_Tick(void) {
     case COOP_PB9_DOWN:
         if (millis() > g_delay_deadline) {
             Serial.println("[COOP] PB9到位, 打开夹持器");
+            WebServer_SendLog("[COOP] 阶段: 打开夹持器");
             g_gripper_polling = false;
             g_cs = COOP_GRIPPER_OPEN;
         }
@@ -240,6 +270,7 @@ void AutoMode_Tick(void) {
     case COOP_GRIPPER_OPEN:
         if (poll_gripper(130.0)) {
             Serial.println("[COOP] 夹持器到位, 发 COOP");
+            WebServer_SendLog("[COOP] 阶段: 发送COOP");
             request_send(FRAME_COOP);
             g_cs = COOP_SEND_COOP;
         }
@@ -249,18 +280,22 @@ void AutoMode_Tick(void) {
     case COOP_WAIT_REDY:
         if (recv_match(FRAME_REDY)) {
             Serial.println("[COOP] 收到 REDY①, PB9 60->160");
+            WebServer_SendLog("[COOP] 阶段: 收REDY①, PB9抬起");
             NRF_StopListening();
             Servo_SetPB9(160.0f, 2.0f);
             g_delay_deadline = millis() + 3000;
             g_cs = COOP_PB9_UP_1;
         } else if (millis() > g_waitDeadline) {
             Serial.println("[COOP] 等 REDY① 超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 等REDY①超时, 中止");
             AutoMode_Abort();
         }
         break;
     case COOP_PB9_UP_1:
         if (millis() > g_delay_deadline) {
             Serial.println("[COOP] 抬起到位, 开始记参考");
+            WebServer_SendLog("[COOP] 阶段: 记视觉参考位");
             CoopVision_RequestRef();
             g_refRetry = 0;
             g_waitDeadline = millis() + 15000;
@@ -271,21 +306,28 @@ void AutoMode_Tick(void) {
         CoopVisionState cv = CoopVision_GetState();
         if (cv == CV_REF_DONE) {
             Serial.println("[COOP] 参考位完成, 发 GOON");
-            WebServer_SendLog("[COOP] 参考位完成");
+            WebServer_SendLog("[COOP] 参考位完成, 发送GOON①");
             request_send(FRAME_GOON);
             g_cs = COOP_SEND_GOON;
         } else if (cv == CV_REF_FAIL) {
             g_refRetry++;
+            g_alert = 3;
             if (g_refRetry >= 3) {
                 Serial.println("[COOP] 记参考连续失败, 中止协同");
-                WebServer_SendLog("[COOP] 记参考连续失败, 中止");
+                WebServer_SendLog("[COOP] 问题: 记参考连续失败x3, 中止");
                 AutoMode_Abort();
             } else {
                 Serial.printf("[COOP] 记参考失败, 重试 %u/3\n", (unsigned)g_refRetry);
+                char lb[64];
+                snprintf(lb, sizeof(lb), "[COOP] 问题: 记参考失败, 重试%u/3",
+                         (unsigned)g_refRetry);
+                WebServer_SendLog(lb);
                 CoopVision_RequestRef();
             }
         } else if (millis() > g_waitDeadline) {
             Serial.println("[COOP] 记参考超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 记参考超时, 中止");
             AutoMode_Abort();
         }
         break;
@@ -304,6 +346,8 @@ void AutoMode_Tick(void) {
             g_cs = COOP_VISION;
         } else if (millis() > g_waitDeadline) {
             Serial.println("[COOP] 等子机作业(REDY②)超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 等REDY②超时(作业过久), 中止");
             AutoMode_Abort();
         }
         break;
@@ -314,6 +358,8 @@ void AutoMode_Tick(void) {
             bool aligned;
             CoopVision_GetDev(&phi, &psi, &ax, &aligned);
             g_cvIter++;
+            g_measRetry = 0;
+            if (g_alert == 4) g_alert = 0;
             Serial.printf("[CV] it=%u meas phi=%.2f psi=%.2f ax=%.1f aligned=%d\n",
                           (unsigned)g_cvIter, (double)phi, (double)psi, (double)ax,
                           aligned ? 1 : 0);
@@ -325,7 +371,8 @@ void AutoMode_Tick(void) {
             /* 轮次安全阀: 正常终止只靠收敛判据, 这里防振荡/不收敛死循环 */
             if (g_cvIter >= AV_SAFETY_MAX_ITER) {
                 Serial.println("[CV] 达轮次安全上限, 中止");
-                WebServer_SendLog("[CV] 达轮次安全上限, 中止");
+                g_alert = 5;
+                WebServer_SendLog("[COOP] 问题: 达纠偏轮次上限, 中止");
                 AutoMode_Abort();
                 break;
             }
@@ -333,7 +380,7 @@ void AutoMode_Tick(void) {
                 g_cvAlignedHits++;
                 if (g_cvAlignedHits >= AV_ALIGNED_HITS) {
                     Serial.printf("[CV] 收敛, 共 %u 轮\n", (unsigned)g_cvIter);
-                    WebServer_SendLog("[CV] 视觉收敛, 进入夹紧");
+                    WebServer_SendLog("[COOP] 阶段: 视觉收敛, 发GOON②等DONE");
                     request_send(FRAME_GOON);
                     g_waitDeadline = millis() + 10000;
                     g_cs = COOP_VISION_WAIT_DONE;
@@ -350,30 +397,40 @@ void AutoMode_Tick(void) {
                 Serial.printf("[CV] it=%u cmd phi=%.2f psi=%.2f ax=%.1f\n",
                               (unsigned)g_cvIter, (double)cPhi, (double)cPsi, (double)cAx);
                 if (cPhi == 0.0f && cPsi == 0.0f && cAx == 0.0f) {
-                    /* 全死区但未 aligned: 按收敛处理 */
                     Serial.println("[CV] 命令全死区, 视为收敛");
-                    WebServer_SendLog("[CV] 命令全死区, 视为收敛");
+                    WebServer_SendLog("[COOP] 阶段: 死区收敛, 发GOON②等DONE");
                     request_send(FRAME_GOON);
                     g_waitDeadline = millis() + 10000;
                     g_cs = COOP_VISION_WAIT_DONE;
                 } else {
+                    char cb[72];
+                    snprintf(cb, sizeof(cb), "[COOP] 阶段: 下发ADJ it=%u",
+                             (unsigned)g_cvIter);
+                    WebServer_SendLog(cb);
                     request_send_adj(cPhi, cPsi, cAx);
-                    g_waitDeadline = millis() + 70000;   /* 子机单步最长 */
+                    g_waitDeadline = millis() + 70000;
                     g_cs = COOP_VISION_WAIT;
                 }
             }
         } else if (cv == CV_MEAS_FAIL) {
             g_measRetry++;
+            g_alert = 4;
             if (g_measRetry >= 3) {
                 Serial.println("[CV] 测量连续失败, 中止");
-                WebServer_SendLog("[CV] 测量连续失败, 中止");
+                WebServer_SendLog("[COOP] 问题: 视觉测量连续失败x3, 中止");
                 AutoMode_Abort();
             } else {
                 Serial.printf("[CV] 测量失败, 重试 %u/3\n", (unsigned)g_measRetry);
+                char lb[64];
+                snprintf(lb, sizeof(lb), "[COOP] 问题: 测量失败, 重试%u/3",
+                         (unsigned)g_measRetry);
+                WebServer_SendLog(lb);
                 CoopVision_RequestMeasure();
             }
         } else if (millis() > g_waitDeadline) {
             Serial.println("[CV] 测量超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 视觉测量超时, 中止");
             AutoMode_Abort();
         }
         break;
@@ -381,23 +438,29 @@ void AutoMode_Tick(void) {
     case COOP_VISION_WAIT:
         if (recv_match_or_imu(FRAME_REDY)) {
             Serial.printf("[CV] it=%u 子机走完, 复测\n", (unsigned)g_cvIter);
+            WebServer_SendLog("[COOP] 阶段: 子机步完成, 复测");
             CoopVision_RequestMeasure();
             g_waitDeadline = millis() + 15000;
             g_cs = COOP_VISION;
         } else if (millis() > g_waitDeadline) {
             Serial.println("[CV] 子机步超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 等子机纠偏步超时, 中止");
             AutoMode_Abort();
         }
         break;
     case COOP_VISION_WAIT_DONE:
         if (recv_match(FRAME_DONE)) {
             Serial.println("[COOP] 收 DONE, PB9 160->80");
+            WebServer_SendLog("[COOP] 阶段: 收DONE, PB9下压夹紧");
             NRF_StopListening();
             Servo_SetPB9(80.0f, 2.0f);
             g_delay_deadline = millis() + 3000;
             g_cs = COOP_PB9_DOWN_2;
         } else if (millis() > g_waitDeadline) {
             Serial.println("[COOP] DONE 超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 等DONE超时, 中止");
             AutoMode_Abort();
         }
         break;
@@ -411,6 +474,7 @@ void AutoMode_Tick(void) {
     case COOP_PRE_GRIP:
         if (poll_gripper(40.0)) {
             Serial.println("[COOP] 预夹紧到位, 发 LOCK");
+            WebServer_SendLog("[COOP] 阶段: 发送LOCK");
             request_send(FRAME_LOCK);
             g_cs = COOP_SEND_LOCK;
         }
@@ -438,12 +502,15 @@ void AutoMode_Tick(void) {
             g_cs = COOP_GRIPPER_CLOSE;
         } else if (millis() > g_waitDeadline) {
             Serial.println("[COOP] 等 ACKD 超时, 中止");
+            g_alert = 2;
+            WebServer_SendLog("[COOP] 问题: 等ACKD超时, 中止");
             AutoMode_Abort();
         }
         break;
     case COOP_PB9_UP_2:
         if (millis() > g_delay_deadline) {
             g_cs = COOP_IDLE;
+            g_alert = 0;
             Serial.println("[COOP] 协同完成");
             WebServer_SendLog("[COOP] 协同完成");
         }
@@ -458,24 +525,44 @@ void AutoMode_FillVisionStatus(uint8_t out[11]) {
     float phi = 0.0f, psi = 0.0f, ax = 0.0f;
     bool aligned = false;
     CoopVision_GetDev(&phi, &psi, &ax, &aligned);
+    /* 阶段码: 视觉忙时暴露 CV 0-6; 其余用 210+ 细粒度协同阶段 */
     uint8_t st;
+    CoopVisionState cv;
     switch (g_cs) {
-    case COOP_VISION_REF:
-    case COOP_VISION:
-    case COOP_VISION_WAIT:
-    case COOP_VISION_WAIT_DONE:
-        st = (uint8_t)CoopVision_GetState();
-        break;
     case COOP_IDLE:
         st = (uint8_t)CV_IDLE;
         break;
-    default:
-        st = 200;   /* 协同进行中(非视觉阶段) */
+    case COOP_PB9_DOWN:        st = 210; break;
+    case COOP_GRIPPER_OPEN:    st = 211; break;
+    case COOP_SEND_COOP:       st = 212; break;
+    case COOP_WAIT_REDY:       st = 213; break;
+    case COOP_PB9_UP_1:        st = 214; break;
+    case COOP_VISION_REF:
+        cv = CoopVision_GetState();
+        st = (cv == CV_REF_BUSY || cv == CV_REF_FAIL || cv == CV_REF_DONE)
+             ? (uint8_t)cv : 215;
         break;
+    case COOP_SEND_GOON:       st = 216; break;
+    case COOP_WAIT_DONE:       st = 217; break;
+    case COOP_VISION:
+        cv = CoopVision_GetState();
+        st = (cv >= CV_MEAS_BUSY && cv <= CV_MEAS_FAIL)
+             ? (uint8_t)cv : 218;
+        break;
+    case COOP_VISION_WAIT:      st = 219; break;
+    case COOP_VISION_WAIT_DONE: st = 220; break;
+    case COOP_PB9_DOWN_2:       st = 221; break;
+    case COOP_PRE_GRIP:         st = 222; break;
+    case COOP_SEND_LOCK:        st = 223; break;
+    case COOP_WAIT_ACKD:        st = 224; break;
+    case COOP_GRIPPER_CLOSE:    st = 225; break;
+    case COOP_PB9_UP_2:         st = 226; break;
+    case COOP_SEND_STOP:        st = 227; break;
+    default:                    st = 200; break;
     }
     out[0] = st;
     out[1] = (uint8_t)g_cvIter;
-    out[2] = 0;
+    out[2] = g_alert;
     int16_t p = (int16_t)lroundf(phi * 100.0f);
     int16_t q = (int16_t)lroundf(psi * 100.0f);
     int16_t a = (int16_t)lroundf(ax);

@@ -12,15 +12,6 @@
 
 static uint8_t signal_quality = 0;
 
-/* 协同帧发送: 失败时补发一次, 避免对端未收到却推进状态机导致等超时 */
-static void sendCoopFrame(const uint8_t* fbuf, uint8_t flen) {
-    if (!NRF_SendFrame(fbuf, flen)) {
-        delay(3);
-        NRF_StopListening();
-        NRF_SendFrame(fbuf, flen);
-    }
-}
-
 uint8_t JoypadSender_GetSignalQuality(void) {
     return signal_quality;
 }
@@ -73,9 +64,9 @@ void JoypadSender_Task(void *pvParameters) {
             /* 协同/纠偏测试帧最长 21 字节 (ADJ,...), 缓冲必须够大 */
             uint8_t fbuf[32]; uint8_t flen = 0;
             if (AutoMode_WantsSendFrame(fbuf, &flen)) {
+                /* 失败则保留待发、不推进状态, 下周期继续补发直到成功 */
                 NRF_StopListening();
-                sendCoopFrame(fbuf, flen);
-                AutoMode_OnFrameSent();   /* 补发后无论成败都推进状态+切RX */
+                AutoMode_OnTxResult(NRF_SendFrame(fbuf, flen));
             } else if (AlignTest_WantsSendFrame(fbuf, &flen)) {
                 NRF_StopListening();
                 NRF_SendFrame(fbuf, flen);
@@ -91,8 +82,7 @@ void JoypadSender_Task(void *pvParameters) {
         uint8_t fbuf[32]; uint8_t flen = 0;
         if (AutoMode_WantsSendFrame(fbuf, &flen)) {
             NRF_StopListening();
-            sendCoopFrame(fbuf, flen);
-            AutoMode_OnFrameSent();
+            AutoMode_OnTxResult(NRF_SendFrame(fbuf, flen));
         } else if (AlignTest_WantsSendFrame(fbuf, &flen)) {
             NRF_StopListening();
             NRF_SendFrame(fbuf, flen);

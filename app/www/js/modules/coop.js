@@ -1,8 +1,7 @@
 /*
  * modules/coop.js - 子母协同模块
- * 功能: 启动协同 (CMD 0x19) 
- * 显示: 母机滚转与 IMU 在线状态 (状态帧不含子机 IMU)
- * 扩展: ACTIONS 中追加动作即可, UI 自动生成
+ * 功能: 启动协同 (CMD 0x19)
+ * 显示: 当前协同阶段 / 问题告警 (0x88) + 母机滚转 / 激光
  */
 (function (global) {
   'use strict';
@@ -14,6 +13,8 @@
   function CoopModule(app) {
     this.app = app;
     this._els = {};
+    this._lastStage = '';
+    this._lastAlert = '';
   }
 
   CoopModule.prototype.mount = function (container) {
@@ -29,6 +30,24 @@
         });
       })
     ));
+
+    var stageValue = UI.el('span', { class: 'mrow-value', text: '空闲' });
+    container.appendChild(UI.el('div', { class: 'mrow' }, [
+      UI.el('label', { class: 'mrow-label', text: '协同阶段' }),
+      stageValue
+    ]));
+
+    var alertValue = UI.el('span', { class: 'mrow-value', text: '—' });
+    container.appendChild(UI.el('div', { class: 'mrow' }, [
+      UI.el('label', { class: 'mrow-label', text: '问题反馈' }),
+      alertValue
+    ]));
+
+    var roundValue = UI.el('span', { class: 'mrow-value', text: '—' });
+    container.appendChild(UI.el('div', { class: 'mrow' }, [
+      UI.el('label', { class: 'mrow-label', text: '纠偏轮次' }),
+      roundValue
+    ]));
 
     var rollValue = UI.el('span', { class: 'mrow-value', text: '—' });
     var rollPill = UI.el('span', { class: 'pill', text: '离线' });
@@ -52,24 +71,64 @@
       laserPill
     ]));
 
+    this._els.stage = stageValue;
+    this._els.alert = alertValue;
+    this._els.round = roundValue;
     this._els.roll = rollValue;
     this._els.rollPill = rollPill;
     this._els.gnd = gndValue;
     this._els.laser = laserValue;
     this._els.laserPill = laserPill;
+
+    if (this.app && this.app.transport) {
+      this.app.transport.on('alignState', function (s) { self._onAlignState(s); });
+    }
+  };
+
+  CoopModule.prototype._onAlignState = function (s) {
+    if (!s) return;
+    var stage = s.stateText || ('状态' + s.state);
+    if (this._els.stage) this._els.stage.textContent = stage;
+
+    if (this._els.round) {
+      if (s.state === 0) this._els.round.textContent = '—';
+      else this._els.round.textContent = s.iter + ' / ' + s.maxIter;
+    }
+
+    var alertTxt = s.alertText || '';
+    if (this._els.alert) {
+      this._els.alert.textContent = alertTxt || '—';
+      this._els.alert.style.color = alertTxt ? '#c0392b' : '';
+    }
+
+    /* 阶段变化记一条日志, 便于对照问题 */
+    if (stage !== this._lastStage && s.state !== 0) {
+      this._lastStage = stage;
+      UI.log('协同阶段: ' + stage);
+    }
+    if (alertTxt && alertTxt !== this._lastAlert) {
+      this._lastAlert = alertTxt;
+      UI.log('协同问题: ' + alertTxt, true);
+      if (typeof UI.toast === 'function') UI.toast(alertTxt);
+    }
+    if (!alertTxt) this._lastAlert = '';
   };
 
   CoopModule.prototype.run = function (action) {
     var build = Protocol[action.method];
     if (typeof build !== 'function') { UI.log('未知协同动作: ' + action.method, true); return; }
-    /* 启动协同附带视觉板地址 (自动发现的 K230), 母机注入 CoopVision 并持久化;
-       没有地址也照发, 母机用上次保存的 */
     var ip = '';
     try { ip = (this.app.camera && this.app.camera.getIp('child')) || ''; } catch (e) {}
     var frame = action.method === 'coopStart' ? build(ip) : build();
     var sent = this.app.transport.send(frame);
     UI.log(action.label + (ip ? ' (视觉板 ' + ip + ')' : ' (无视觉板地址, 用母机缓存)'), !sent);
-    if (sent) UI.toast(action.toast);
+    if (sent) {
+      UI.toast(action.toast);
+      this._lastStage = '';
+      this._lastAlert = '';
+      if (this._els.stage) this._els.stage.textContent = '启动中…';
+      if (this._els.alert) { this._els.alert.textContent = '—'; this._els.alert.style.color = ''; }
+    }
   };
 
   CoopModule.prototype.onState = function (state) {

@@ -226,7 +226,9 @@
   /* ==================== 0x88 / 0x89 ==================== */
 
   AlignModule.prototype._onAlignState = function (s) {
-    if (this._stateEl) this._stateEl.textContent = s.stateText || ("状态" + s.state);
+    var st = s.stateText || ("状态" + s.state);
+    if (s.alertText) st += " · " + s.alertText;
+    if (this._stateEl) this._stateEl.textContent = st;
     if (this._roundEl) this._roundEl.textContent = s.iter + " / " + s.maxIter;
     if (typeof s.phi === "number") {
       this._setErrText(s.phi, s.psi, s.ax, s.aligned);

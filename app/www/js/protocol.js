@@ -31,13 +31,26 @@
   };
 
   /* 协同视觉纠偏: 状态帧 0x88 / 视觉 JSON 0x89
-   * 0x88 state: 0-6 = coop_vision CV 状态; 200 = 协同进行中(非视觉阶段) */
+   * [0] 阶段: 0-6=CV; 210-227=协同细阶段; 200=协同中; 201=纠偏测试
+   * [2] 告警: 0正常 1=NRF补发中 2=超时 3=记参考失败 4=测量失败 5=轮次上限 6=已中止 */
   var ALIGN_STATE_CMD = 0x88;
   var ALIGN_JSON_CMD  = 0x89;
   var ALIGN_STATE_LEN = 11;
   var ALIGN_STATE_TEXT = {
     0: '空闲', 1: '记参考中', 2: '测量中', 3: '参考已就绪',
-    4: '参考失败', 5: '测量完成', 6: '测量失败', 200: '协同进行中', 201: '纠偏测试中'
+    4: '参考失败', 5: '测量完成', 6: '测量失败',
+    200: '协同进行中', 201: '纠偏测试中',
+    210: 'PB9下压', 211: '打开夹持器', 212: '发送COOP',
+    213: '等REDY①(风机)', 214: 'PB9抬起', 215: '记参考位',
+    216: '发送GOON①', 217: '子机作业中', 218: '视觉纠偏',
+    219: '等子机纠偏步', 220: '等DONE', 221: 'PB9下压夹紧',
+    222: '预夹紧', 223: '发送LOCK', 224: '等ACKD',
+    225: '夹持器夹紧', 226: '抬起完成', 227: '发送STOP'
+  };
+  var ALIGN_ALERT_TEXT = {
+    0: '', 1: 'NRF发送失败, 正在补发…', 2: '等待超时, 已中止',
+    3: '记参考失败', 4: '视觉测量失败', 5: '纠偏轮次达上限',
+    6: '协同已中止'
   };
 
   var CAN_SUB = { ENABLE: 0, DISABLE: 1, SET_ZERO: 2 };
@@ -149,15 +162,18 @@
     return text;
   }
 
-  /* 0x88: [state][iter][rc][phi i16×100][psi i16×100][ax i16][aligned][maxIter] */
+  /* 0x88: [state][iter][alert][phi i16×100][psi i16×100][ax i16][aligned][maxIter] */
   function parseAlignState(frame) {
     var f = parseFrame(frame);
     if (!f || f.cmd !== ALIGN_STATE_CMD || f.payload.length < ALIGN_STATE_LEN) return null;
     var p = f.payload;
     var dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    var alert = p[2];
     return {
       state: p[0],
       iter: p[1],
+      alert: alert,
+      alertText: ALIGN_ALERT_TEXT[alert] || (alert ? ('告警' + alert) : ''),
       phi: dv.getInt16(3, true) / 100,
       psi: dv.getInt16(5, true) / 100,
       ax: dv.getInt16(7, true),
