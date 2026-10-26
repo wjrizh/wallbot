@@ -626,7 +626,9 @@ static void Coop_SendFrame(const char *frame){
   size_t len = strlen(frame);
   if(len > 32) len = 32;
   memcpy(buf, frame, len);
-  if(Coop_SendRaw(buf, 32, 20) == 0) printf("%s sent\r\n", frame);
+  /* 8 次重试: 每次 >=2ms 间隔, 至少覆盖母机 2 个 10ms 采样周期;
+     重试过多会让子机长时间停在 TX, 反而丢母机下行帧 */
+  if(Coop_SendRaw(buf, 32, 8) == 0) printf("%s sent\r\n", frame);
   else                               printf("%s send fail\r\n", frame);
 }
 

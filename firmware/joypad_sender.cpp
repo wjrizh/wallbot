@@ -12,6 +12,15 @@
 
 static uint8_t signal_quality = 0;
 
+/* 协同帧发送: 失败时补发一次, 避免对端未收到却推进状态机导致等超时 */
+static void sendCoopFrame(const uint8_t* fbuf, uint8_t flen) {
+    if (!NRF_SendFrame(fbuf, flen)) {
+        delay(3);
+        NRF_StopListening();
+        NRF_SendFrame(fbuf, flen);
+    }
+}
+
 uint8_t JoypadSender_GetSignalQuality(void) {
     return signal_quality;
 }
@@ -65,8 +74,8 @@ void JoypadSender_Task(void *pvParameters) {
             uint8_t fbuf[32]; uint8_t flen = 0;
             if (AutoMode_WantsSendFrame(fbuf, &flen)) {
                 NRF_StopListening();
-                NRF_SendFrame(fbuf, flen);
-                AutoMode_OnFrameSent();
+                sendCoopFrame(fbuf, flen);
+                AutoMode_OnFrameSent();   /* 补发后无论成败都推进状态+切RX */
             } else if (AlignTest_WantsSendFrame(fbuf, &flen)) {
                 NRF_StopListening();
                 NRF_SendFrame(fbuf, flen);
@@ -82,7 +91,7 @@ void JoypadSender_Task(void *pvParameters) {
         uint8_t fbuf[32]; uint8_t flen = 0;
         if (AutoMode_WantsSendFrame(fbuf, &flen)) {
             NRF_StopListening();
-            NRF_SendFrame(fbuf, flen);
+            sendCoopFrame(fbuf, flen);
             AutoMode_OnFrameSent();
         } else if (AlignTest_WantsSendFrame(fbuf, &flen)) {
             NRF_StopListening();
