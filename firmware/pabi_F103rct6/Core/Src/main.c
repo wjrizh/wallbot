@@ -1059,8 +1059,8 @@ void AUTO(void){
     /* 通知 Pi 常驻服务开始采集; 不等待预测, 抬升不阻塞 */
     g_ae_pending = 0; g_ae_sent_ok = 0; g_ae_last_tx_ms = 0;
     Pi_SendCap();
-    /* 探头下压作业 20s */
-    if(Coop_ServoAHold(20000)) { g_coop_report_en = 0; motor_STOP(); return; }
+    /* 探头下压作业 25s */
+    if(Coop_ServoAHold(25000)) { g_coop_report_en = 0; motor_STOP(); return; }
     /* 作业后再加吸到1639, 再慢抬探头+往回爬 */
     FENG_PWM_SET = 1639;
     __HAL_TIM_SET_COMPARE(&htim5,TIM_CHANNEL_1,FENG_PWM_SET);

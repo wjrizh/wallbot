@@ -123,15 +123,40 @@ def _run_capture() -> bool:
     if not MAIN_PY.is_file():
         _log(f"找不到 {MAIN_PY}")
         return False
-    _log("开始采集 main.py …")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["AE_DATA_DIR"] = str(DATA_DIR)
+    _log(f"开始采集 main.py … data={DATA_DIR}")
+    # 与网页启动一致: -u 无缓冲, 日志进 journal; 绝对数据目录避免写丢
     proc = subprocess.run(
-        [sys.executable, str(MAIN_PY)],
+        [sys.executable, "-u", str(MAIN_PY)],
         cwd=str(HERE),
+        env=env,
         text=True,
         encoding="utf-8",
         errors="replace",
+        capture_output=True,
     )
+    if proc.stdout:
+        for line in proc.stdout.strip().splitlines()[-40:]:
+            _log(f"main| {line}")
+    if proc.stderr:
+        for line in proc.stderr.strip().splitlines()[-20:]:
+            _log(f"main! {line}")
     _log(f"采集结束 code={proc.returncode}")
+    try:
+        files = sorted(DATA_DIR.glob("AE_Data_*.pridb"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            newest = files[0]
+            _log(f"最新 pridb={newest.name} size={newest.stat().st_size}")
+        else:
+            _log("data_storage 内仍无 AE_Data_*.pridb")
+    except OSError as exc:
+        _log(f"列举数据目录失败: {exc}")
+    try:
+        os.sync()
+    except Exception:
+        pass
     return proc.returncode == 0
 
 

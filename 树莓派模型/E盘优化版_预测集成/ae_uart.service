@@ -4,12 +4,16 @@ After=multi-user.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/pi/ae_project
+WorkingDirectory=/home/admin/ae_project
 Environment=AE_UART_PORT=/dev/serial0
 Environment=AE_UART_BAUD=115200
-ExecStart=/usr/bin/python3 /home/pi/ae_project/ae_uart_service.py
+Environment=AE_DATA_DIR=/home/admin/ae_project/data_storage
+Environment=NODE_BIN=/usr/bin/node
+ExecStart=/home/admin/ae_venv/bin/python -u /home/admin/ae_project/ae_uart_service.py
 Restart=always
 RestartSec=3
+User=admin
+Group=admin
 
 [Install]
 WantedBy=multi-user.target

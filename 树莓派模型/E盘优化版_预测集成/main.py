@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import queue
 import threading
@@ -6,6 +7,7 @@ import functools
 import json
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from vallenae.io import PriDatabase, TraDatabase, HitRecord, TraRecord, ParametricRecord
@@ -14,6 +16,8 @@ from waveline import SpotWave
 from waveline.spotwave import TRRecord
 
 print = functools.partial(print, flush=True)
+
+HERE = Path(__file__).resolve().parent
 
 
 def main():
@@ -25,15 +29,17 @@ def main():
         print(f"发现设备端口: {port}")
     except IndexError:
         print("未找到 SpotWave 设备，请检查 USB 连接！")
-        return
+        return 2
 
-    data_dir = "data_storage"
+    data_dir = Path(os.environ.get("AE_DATA_DIR", HERE / "data_storage")).resolve()
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    pridb_filename = os.path.join(data_dir, f"AE_Data_{timestamp}.pridb")
-    tradb_filename = os.path.join(data_dir, f"AE_Data_{timestamp}.tradb")
+    pridb_filename = str(data_dir / f"AE_Data_{timestamp}.pridb")
+    tradb_filename = str(data_dir / f"AE_Data_{timestamp}.tradb")
 
-    os.makedirs(data_dir, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    print(f"数据目录: {data_dir}")
+    print(f"将写入: {pridb_filename}")
     if os.path.exists(pridb_filename):
         os.remove(pridb_filename)
     if os.path.exists(tradb_filename):
@@ -48,18 +54,19 @@ def main():
     # =========================================================================
     settings = {
         "sample_rate": 2000000,
-        "threshold_db": 30,
-        "filter_hp_khz": 10,
-        "filter_lp_khz": 100,
-        "ddt_us": 400,
-        "pretrigger": 0,
-        "preamp_gain": 40,
+        "threshold_db": 0,
+        "filter_hp_khz": 20,
+        "filter_lp_khz": 300,
+        "ddt_us": 100000,
+        "pretrigger": 20,
+        "preamp_gain": 0,
         "acq_duration_s": 20
     }
 
-    if os.path.exists("config.json"):
+    config_path = HERE / "config.json"
+    if config_path.is_file():
         try:
-            with open("config.json", "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 settings.update(json.load(f))
             print(f"已加载网页参数: {settings}")
         except Exception as e:
@@ -216,9 +223,33 @@ def main():
 
     print("硬件连接已关闭，正在等待数据落盘...")
     data_queue.put(None)
-    writer_thread.join(timeout=10)
-    print("✅ 所有任务圆满完成！")
+    writer_thread.join(timeout=120)
+    if writer_thread.is_alive():
+        print("写盘线程超时未结束，数据可能不完整")
+        return 3
+
+    try:
+        os.sync()
+    except Exception:
+        pass
+
+    try:
+        psz = os.path.getsize(pridb_filename)
+        tsz = os.path.getsize(tradb_filename)
+    except OSError as e:
+        print(f"落盘后无法读取文件大小: {e}")
+        return 4
+    print(f"✅ 落盘完成 pridb={psz}B tradb={tsz}B")
+    if psz <= 0 or tsz <= 0:
+        print("文件大小异常")
+        return 5
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        code = main()
+    except Exception:
+        traceback.print_exc()
+        code = 1
+    sys.exit(int(code or 0))

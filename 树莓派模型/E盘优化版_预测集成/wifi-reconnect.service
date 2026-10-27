@@ -1,0 +1,16 @@
+[Unit]
+Description=WiFi disconnect auto-reconnect watchdog
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+Environment=WIFI_SSID_PRIMARY=ZKXZH
+Environment=WIFI_PASS_PRIMARY=12345678
+Environment=WIFI_CHECK_SEC=15
+ExecStart=/usr/local/bin/wifi-reconnect.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
