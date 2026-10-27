@@ -73,10 +73,76 @@ static float g_child_pitch = 0.0f;
 static float g_child_roll = 0.0f;
 static bool g_child_imu_updated = false;
 
+/* === AE 距离结果 (NRF 'D' 帧, 勿与 ASCII "DONE" 混淆) === */
+static bool    g_ae_have = false;
+static bool    g_ae_fresh = false;
+static int16_t g_ae_cm_x10 = 0x7FFF;
+static uint8_t g_ae_near = 0xFF;
+static uint8_t g_ae_pd = 0xFF;
+static uint8_t g_ae_st = 0xFF;
+static uint8_t g_ae_seq = 0;
+
 float AutoMode_GetChildPitch(void) { return g_child_pitch; }
 float AutoMode_GetChildRoll(void) { return g_child_roll; }
 bool AutoMode_IsChildIMUUpdated(void) { return g_child_imu_updated; }
 void AutoMode_ClearChildIMUFlag(void) { g_child_imu_updated = false; }
+
+static bool is_ae_dist_frame(const uint8_t* tmp, uint8_t len) {
+    /* 'D' + flags; 排除 DONE (D O N E) */
+    return len >= 6 && tmp[0] == 'D' && tmp[1] != 'O';
+}
+
+static void note_ae_frame(const uint8_t* tmp, uint8_t len) {
+    uint8_t flags;
+    if (!is_ae_dist_frame(tmp, len)) return;
+    flags = tmp[1];
+    memcpy(&g_ae_cm_x10, &tmp[2], 2);
+    if (!(flags & 0x01)) g_ae_cm_x10 = 0x7FFF;
+    g_ae_near = (flags & 0x02) ? tmp[4] : 0xFF;
+    if (flags & 0x04) g_ae_pd = (flags & 0x08) ? 1 : 0;
+    else g_ae_pd = 0xFF;
+    g_ae_st = tmp[5];
+    g_ae_have = true;
+    g_ae_fresh = true;
+    g_ae_seq++;
+    {
+        char lb[80];
+        if (g_ae_cm_x10 != (int16_t)0x7FFF)
+            snprintf(lb, sizeof(lb), "[AE] 距离 %.1fcm 标准点 %u pd=%u st=%u",
+                     g_ae_cm_x10 / 10.0f, (unsigned)g_ae_near, (unsigned)g_ae_pd, (unsigned)g_ae_st);
+        else
+            snprintf(lb, sizeof(lb), "[AE] 无有效距离 near=%u pd=%u st=%u",
+                     (unsigned)g_ae_near, (unsigned)g_ae_pd, (unsigned)g_ae_st);
+        WebServer_SendLog(lb);
+        Serial.println(lb);
+    }
+}
+
+bool AutoMode_HasAeResult(void) { return g_ae_have; }
+bool AutoMode_IsAeFresh(void) { return g_ae_fresh; }
+void AutoMode_ClearAeFresh(void) { g_ae_fresh = false; }
+
+void AutoMode_FillAePayload(uint8_t out[6]) {
+    memcpy(&out[0], &g_ae_cm_x10, 2);
+    out[2] = g_ae_near;
+    out[3] = g_ae_pd;
+    out[4] = g_ae_st;
+    out[5] = g_ae_seq;
+}
+
+void AutoMode_PollAeRx(void) {
+    uint8_t len = 0;
+    uint8_t tmp[32];
+    while (NRF_ReceiveFrame(tmp, sizeof(tmp), &len)) {
+        if (is_ae_dist_frame(tmp, len)) note_ae_frame(tmp, len);
+        else if (len >= 9 && tmp[0] == 'I') {
+            memcpy(&g_child_pitch, &tmp[1], 4);
+            memcpy(&g_child_roll, &tmp[5], 4);
+            g_child_imu_updated = true;
+        }
+        /* 其它帧(REDY/DONE/…) 非协同时丢弃; 协同态由 recv_match* 处理 */
+    }
+}
 
 static bool poll_gripper(float target) {
     if (!g_gripper_polling) {
@@ -219,6 +285,7 @@ static bool recv_match(const uint8_t* target) {
     uint8_t len = 0;
     uint8_t tmp[32];
     while (NRF_ReceiveFrame(tmp, sizeof(tmp), &len)) {
+        if (is_ae_dist_frame(tmp, len)) { note_ae_frame(tmp, len); continue; }
         for (uint8_t i = 0; i <len; i++) {
             g_rx_buf[g_rx_idx] = tmp[i]; g_rx_idx++;
             if (g_rx_idx >= 4) {
@@ -233,11 +300,12 @@ static bool recv_match(const uint8_t* target) {
     return false;
 }
 
-/* 收帧, 同时解析子机 IMU 帧 */
+/* 收帧, 同时解析子机 IMU / AE 距离帧 */
 static bool recv_match_or_imu(const uint8_t* target) {
     uint8_t len = 0;
     uint8_t tmp[32];
     while (NRF_ReceiveFrame(tmp, sizeof(tmp), &len)) {
+        if (is_ae_dist_frame(tmp, len)) { note_ae_frame(tmp, len); continue; }
         if (len >= 9 && tmp[0] == 'I') {
             memcpy(&g_child_pitch, &tmp[1], 4);
             memcpy(&g_child_roll, &tmp[5], 4);

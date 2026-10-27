@@ -33,6 +33,7 @@ static void Task_PushLaser(void *pvParameters) {
         vTaskDelayUntil(&xLastWakeTime, xPeriod);
         WebServer_PushLaser();
         WebServer_PushAlignState();   /* 0x88 协同视觉纠偏状态 */
+        if (AutoMode_IsAeFresh()) WebServer_PushAeDistance();  /* 0x8A AE 距离 */
         WebServer_Tick();   /* WiFi 掉线自动重连 */
     }
 }

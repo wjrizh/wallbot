@@ -32,4 +32,17 @@ float AutoMode_GetChildRoll(void);
 bool AutoMode_IsChildIMUUpdated(void);
 void AutoMode_ClearChildIMUFlag(void);
 
+/* AE 距离(子机 UART←Pi, 经 NRF 'D' 帧上送)
+ * 0x8A payload 6 字节:
+ * [0..1] cm×10 int16, 0x7FFF=无效
+ * [2] near_cm, 0xFF=无效
+ * [3] pd: 0/1/0xFF
+ * [4] st: 0=ok 1=few 2=bad 3=err 4=busy 5=nopd
+ * [5] seq/flags */
+void AutoMode_PollAeRx(void);          /* 非协同时也抽 NRF 中的 'D' */
+bool AutoMode_HasAeResult(void);
+void AutoMode_FillAePayload(uint8_t out[6]);
+void AutoMode_ClearAeFresh(void);      /* 推送后清 fresh 标志(可重复推同一结果) */
+bool AutoMode_IsAeFresh(void);
+
 #endif

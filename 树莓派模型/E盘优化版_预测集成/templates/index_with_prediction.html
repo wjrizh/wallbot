@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpotWave 控制面板</title>
+    <style>
+        body { font-family: sans-serif; background-color: #f4f4f4; padding: 16px; }
+        .container { max-width: 1480px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(360px, 1fr); gap: 24px; align-items: start; }
+        .dashboard-main { min-width: 0; }
+        h1 { text-align: center; color: #333; }
+        .controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .file-actions { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+        button { padding: 8px 16px; font-size: 14px; cursor: pointer; border: none; border-radius: 4px; color: white; transition: background 0.3s; }
+        .btn-start { background-color: #28a745; font-size: 16px; padding: 10px 20px; }
+        .btn-start:hover { background-color: #218838; }
+        .btn-stop { background-color: #dc3545; font-size: 16px; padding: 10px 20px; }
+        .btn-stop:hover { background-color: #c82333; }
+        .btn-refresh { background-color: #007bff; margin-bottom: 10px; }
+        .btn-refresh:hover { background-color: #0069d9; }
+        .btn-delete { background-color: #dc3545; margin-left: 10px; }
+        .btn-delete:hover { background-color: #c82333; }
+        .btn-download { background-color: #17a2b8; text-decoration: none; padding: 8px 16px; border-radius: 4px; color: white; display: inline-block; border: none; cursor: pointer; }
+        .btn-download:hover { background-color: #138496; }
+        .btn-predict { background-color: #4957a8; margin-left: 10px; }
+        .btn-predict:hover { background-color: #39468c; }
+        .btn-predict:disabled { opacity: 0.6; cursor: wait; }
+        .result-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(20, 30, 48, 0.62); }
+        .result-overlay[hidden] { display: none; }
+        .result-dialog { box-sizing: border-box; width: min(620px, 100%); max-height: 90vh; overflow-y: auto; padding: 22px; border-radius: 12px; background: #fff; box-shadow: 0 16px 48px rgba(0,0,0,0.25); }
+        .result-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .result-header h2 { margin: 0; font-size: 22px; }
+        .result-close { background: #e9edf3; color: #243247; font-size: 24px; line-height: 1; padding: 6px 12px; }
+        .result-file { color: #526277; font-size: 13px; margin: 8px 0 16px; word-break: break-all; }
+        .result-state { padding: 10px 14px; border-radius: 8px; font-weight: bold; background: #eaf2ff; color: #17457c; }
+        .result-state[data-tone="warning"] { background: #fff3db; color: #815100; }
+        .result-state[data-tone="error"] { background: #fde9e9; color: #a12424; }
+        .result-distance { font-size: 32px; font-weight: bold; color: #123c67; margin: 16px 0; }
+        .result-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .result-metric { border: 1px solid #dce5ef; border-radius: 8px; background: #f8fbff; padding: 10px; }
+        .result-metric span { display: block; color: #617084; font-size: 12px; margin-bottom: 5px; }
+        .result-metric strong { font-size: 16px; color: #23364c; }
+        .result-note { color: #49576a; font-size: 14px; line-height: 1.5; }
+        .result-warnings { color: #8a4b00; padding-left: 20px; margin-bottom: 0; }
+        .capture-confirm-overlay { position: fixed; inset: 0; z-index: 1300; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(20, 30, 48, 0.62); }
+        .capture-confirm-overlay[hidden], .capture-toast[hidden] { display: none; }
+        .capture-confirm-dialog { box-sizing: border-box; width: min(420px, 100%); padding: 24px; border-radius: 10px; background: #fff; box-shadow: 0 16px 48px rgba(0,0,0,0.25); }
+        .capture-confirm-dialog h2 { margin: 0 0 10px; font-size: 21px; color: #243247; }
+        .capture-confirm-dialog p { margin: 0 0 22px; color: #49576a; line-height: 1.5; }
+        .capture-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+        .capture-confirm-cancel { background: #e9edf3; color: #243247; }
+        .capture-confirm-accept[data-action="start"] { background: #28a745; }
+        .capture-confirm-accept[data-action="stop"] { background: #dc3545; }
+        .capture-toast { box-sizing: border-box; position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 1200; width: min(430px, calc(100vw - 28px)); padding: 14px 16px; border: 1px solid #cbd5e1; border-radius: 9px; background: #fff; color: #243247; box-shadow: 0 10px 30px rgba(20,30,48,.25); }
+        .capture-toast-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+        .capture-toast-header strong { font-size: 15px; }
+        .capture-toast-close { flex: 0 0 auto; background: #e9edf3; color: #243247; padding: 3px 8px; font-size: 18px; }
+        .capture-toast-file { margin-top: 4px; color: #617084; font-size: 12px; overflow-wrap: anywhere; }
+        .capture-toast-distance { margin-top: 8px; font-size: 23px; font-weight: bold; color: #123c67; }
+        .capture-toast-state { margin-top: 4px; font-size: 13px; line-height: 1.4; max-height: 3em; overflow: hidden; }
+        .capture-toast-warning { margin-top: 5px; color: #8a4b00; font-size: 12px; line-height: 1.4; max-height: 3em; overflow: hidden; }
+        .file-picker-overlay { position: fixed; inset: 0; z-index: 999; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(20, 30, 48, 0.62); }
+        .file-picker-overlay[hidden], .picker-result[hidden] { display: none; }
+        .file-picker-dialog { box-sizing: border-box; width: min(680px, 100%); max-height: 90vh; overflow-y: auto; padding: 22px; border-radius: 10px; background: #fff; box-shadow: 0 16px 48px rgba(0,0,0,0.25); }
+        .picker-search { box-sizing: border-box; width: 100%; padding: 10px 12px; margin: 12px 0 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 16px; }
+        .picker-file-list { display: grid; gap: 7px; margin: 12px 0; max-height: 250px; overflow-y: auto; }
+        .picker-file-option { width: 100%; min-width: 0; margin: 0; padding: 10px 12px; border: 1px solid #dce5ef; border-radius: 4px; background: #f8fbff; color: #23364c; text-align: left; overflow-wrap: anywhere; }
+        .picker-file-option[aria-pressed="true"] { border-color: #4957a8; box-shadow: inset 0 0 0 1px #4957a8; }
+        .picker-file-option small { display: block; margin-top: 3px; color: #617084; font-size: 12px; }
+        .picker-empty { padding: 18px 8px; text-align: center; color: #666; }
+        .picker-empty[hidden] { display: none; }
+        .picker-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+        .picker-result { margin-top: 16px; padding-top: 14px; border-top: 1px solid #dce5ef; }
+        .picker-result h3 { margin: 0 0 8px; font-size: 17px; }
+        .picker-result .result-distance { font-size: 27px; }
+        @media (max-width: 520px) { .result-metrics { grid-template-columns: 1fr; } .result-dialog { padding: 16px; } }
+        @media (max-width: 520px) { .file-picker-dialog { padding: 16px; } .picker-actions button { flex: 1; } }
+        #status { text-align: center; font-weight: bold; margin-bottom: 10px; }
+        .status-running { color: #28a745; }
+        .status-stopped { color: #dc3545; }
+        #log-container { background: #222; color: #fff; padding: 15px; height: 300px; overflow-y: scroll; border-radius: 4px; font-family: monospace; font-size: 12px; margin-bottom: 20px; white-space: pre-wrap; }
+        .data-files { min-width: 0; border-left: 1px solid #eee; padding-left: 20px; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+        .file-table-wrap { overflow-x: auto; }
+        .file-scroll-hint { display: none; }
+        #file-table { table-layout: fixed; }
+        #file-table th:nth-child(2) { width: 38%; }
+        #file-table th:nth-child(3) { width: 68px; }
+        #file-table .checkbox-cell { width: 38px; padding: 4px; }
+        #file-table td:last-child .btn-download, #file-table td:last-child .btn-delete, #file-table td:last-child .btn-predict { margin: 2px 3px 2px 0; padding: 6px 8px; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        table, th, td { border: 1px solid #ddd; }
+        th, td { padding: 8px; text-align: left; vertical-align: middle; }
+        th { background-color: #f8f9fa; }
+        .checkbox-cell { text-align: center; width: 60px; }
+        .empty-row { text-align: center; color: #666; }
+        .hint-text { font-size: 12px; color: #666; margin-top: 8px; }
+        .file-name { word-break: break-all; }
+        @media (max-width: 1050px) {
+            .dashboard-grid { grid-template-columns: minmax(0, 1fr); }
+            .data-files { border-left: 0; border-top: 1px solid #eee; padding-left: 0; padding-top: 20px; position: static; max-height: none; overflow: visible; }
+        }
+        @media (max-width: 600px) {
+            #file-table { min-width: 620px; }
+            .file-scroll-hint { display: block; }
+        }
+        @media (max-width: 520px) { body { padding: 8px; } .container { padding: 14px; } }
+        .prediction-panel { border: 1px solid #cbd5e1; background: #f8fbff; padding: 16px; border-radius: 6px; margin-bottom: 20px; }
+        .prediction-panel h3 { margin-top: 0; }
+        #prediction-distance { font-size: 30px; font-weight: bold; color: #123c67; margin: 8px 0; }
+        #prediction-detail { color: #555; font-size: 13px; }
+        #prediction-warnings { color: #8a4b00; padding-left: 20px; margin-bottom: 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SpotWave 数据采集控制</h1>
+
+        <div id="status">加载中...</div>
+
+        <div class="dashboard-grid">
+            <div class="dashboard-main">
+
+        <div class="settings-panel" style="background: #f8f9fa; padding: 15px; border-radius: 6px; margin-bottom: 20px; border: 1px solid #ddd;">
+            <h3 style="margin-top: 0; font-size: 16px;">⚙️ 采集参数设置</h3>
+            <table style="width: 100%; border: none;">
+                <tr>
+                    <td style="border: none; padding: 5px;">TR 采样率 (Sample rate):</td>
+                    <td style="border: none; padding: 5px;">
+                        <select id="set-samplerate" style="padding: 4px;">
+                            <option value="2000000"selected>2 MHz</option>
+                            <option value="1000000" >1 MHz</option>
+                            <option value="500000">500 kHz</option>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">触发阈值 (Threshold) [dB]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-threshold" value="40" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">硬件滤波 (Filter) [kHz]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-hp" value="20" style="padding: 4px; width: 60px;"> -
+                        <input type="number" id="set-lp" value="500" style="padding: 4px; width: 60px;">
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">持续时间锁定 (DDT) [µs]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-ddt" value="120" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+                <tr>
+	    <td style="border: none; padding: 5px;">Pretrigger [µs]:</td>
+	    <td style="border: none; padding: 5px;">
+	        <input type="number" id="set-pretrigger" value="34" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">Preamp gain [dB]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-preamp-gain" value="20" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+            </table>
+            <button type="button" class="btn-predict" style="margin: 10px 0 0;" onclick="usePredictionPreset()">设置实验性距离采集参数</button>
+            <div id="prediction-preset-note" class="hint-text">点击后填写：2 MHz、阈值 0 dB、滤波 20–300 kHz、DDT 100,000 µs、Pretrigger 20 µs、Preamp gain 0 dB；不会立即启动采集。连续模式理论上约每条 200,000 点，接近缓冲上限，可能丢失波形；当前程序尚未将 Pretrigger 和增益下发硬件，阈值仅用于软件特征计算。</div>
+        </div>
+
+        <div class="controls">
+            <button id="start-program" class="btn-start" onclick="startProgram()">▶️ 启动程序</button>
+            <button id="stop-program" class="btn-stop" onclick="stopProgram()">⏹️ 停止程序</button>
+        </div>
+
+        <section class="prediction-panel" aria-live="polite">
+            <h3>实时局放与距离估算</h3>
+            <div id="prediction-summary">等待采集数据...</div>
+            <div id="prediction-distance">距离：—</div>
+            <div id="prediction-detail">对照标准：10.20 亚克力</div>
+            <ul id="prediction-warnings"></ul>
+            <p style="font-size: 12px; color: #666; margin-bottom: 0;">10.20 标准库只标定 0、10、20、30、40、50 cm：近场缺少 3 cm 等中间点，仅报范围；50–60 cm 仅显示超过信号阈值的未标定外推值。2 MHz / 20,000 点仅提供实验性 RMS 估算，均须用已知距离实测复核；其他采样条件不显示距离。</p>
+        </section>
+
+        <h3>运行日志 (最新 50 行)</h3>
+        <div id="log-container"></div>
+            </div>
+
+        <div class="data-files">
+            <h3>数据文件管理</h3>
+
+            <div class="file-actions">
+                <button class="btn-refresh" onclick="loadFileList(true)">🔄 刷新文件列表</button>
+                <button class="btn-refresh" onclick="toggleSelectAll()">☑️ 全选/取消全选</button>
+                <button class="btn-download" onclick="downloadSelected()">⬇️ 下载所选</button>
+                <button class="btn-delete" onclick="deleteSelected()">🗑️ 删除所选</button>
+                <button id="open-file-picker" class="btn-predict" type="button" onclick="openFilePicker()">🔎 选择文件查看检测结果</button>
+            </div>
+
+            <div class="hint-text file-scroll-hint">文件表格可左右滑动查看操作按钮。</div>
+            <div class="file-table-wrap">
+            <table id="file-table">
+                <thead>
+                    <tr>
+                        <th class="checkbox-cell">
+                            <input type="checkbox" id="select-all-checkbox" onclick="setSelectAll(this.checked)">
+                        </th>
+                        <th>文件名</th>
+                        <th>大小</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="file-list">
+                </tbody>
+            </table>
+            </div>
+
+            <div class="hint-text">
+                仅显示 .pridb / .tradb 数据文件；WAL、SHM 等辅助文件只隐藏、不删除。独立检测窗口每组配对数据只列一次；未配对数据仍可在主列表下载、管理。批量下载会将所选文件打包为一个 ZIP 文件。
+            </div>
+        </div>
+        </div>
+    </div>
+
+    <div id="capture-confirm-overlay" class="capture-confirm-overlay" hidden>
+        <div id="capture-confirm-dialog" class="capture-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="capture-confirm-title" aria-describedby="capture-confirm-message" tabindex="-1">
+            <h2 id="capture-confirm-title">确认采集操作</h2>
+            <p id="capture-confirm-message"></p>
+            <div class="capture-confirm-actions">
+                <button id="capture-confirm-cancel" class="capture-confirm-cancel" type="button">取消</button>
+                <button id="capture-confirm-accept" class="capture-confirm-accept" type="button">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="capture-toast" class="capture-toast" role="status" aria-live="polite" hidden>
+        <div class="capture-toast-header">
+            <strong>本次采集检测结果</strong>
+            <button id="capture-toast-close" class="capture-toast-close" type="button" aria-label="关闭检测结果提示">×</button>
+        </div>
+        <div id="capture-toast-file" class="capture-toast-file"></div>
+        <div id="capture-toast-distance" class="capture-toast-distance">距离：—</div>
+        <div id="capture-toast-state" class="capture-toast-state"></div>
+        <div id="capture-toast-warning" class="capture-toast-warning"></div>
+    </div>
+
+    <div id="file-picker-overlay" class="file-picker-overlay" hidden>
+        <div id="file-picker-dialog" class="file-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="file-picker-title">
+            <div class="result-header">
+                <h2 id="file-picker-title">选择检测文件</h2>
+                <button id="file-picker-close" class="result-close" type="button" aria-label="关闭文件选择窗口">×</button>
+            </div>
+            <input id="file-picker-search" class="picker-search" type="search" placeholder="按日期或文件名搜索，例如 20260329" aria-label="搜索检测文件">
+            <div class="hint-text">每组同名数据只列一次，自动使用 .pridb 与 .tradb 配对文件；较新的文件排在前面。</div>
+            <div id="file-picker-list" class="picker-file-list" role="group" aria-label="可检测信号文件"></div>
+            <div id="file-picker-empty" class="picker-empty" hidden>没有匹配的配对检测文件</div>
+            <div class="picker-actions">
+                <button id="file-picker-run" class="btn-predict" type="button" disabled>查看检测结果</button>
+            </div>
+            <section id="picker-result" class="picker-result" aria-live="polite" hidden>
+                <h3>检测结果</h3>
+                <div id="picker-result-file" class="result-file"></div>
+                <div id="picker-result-state" class="result-state">等待检测</div>
+                <div id="picker-result-distance" class="result-distance">距离：—</div>
+                <div class="result-metrics">
+                    <div class="result-metric"><span>有效事件</span><strong id="picker-result-events">—</strong></div>
+                    <div class="result-metric"><span>波形数量</span><strong id="picker-result-waveforms">—</strong></div>
+                    <div class="result-metric"><span>采样条件</span><strong id="picker-result-quality">—</strong></div>
+                    <div class="result-metric"><span>预测依据</span><strong id="picker-result-dataset">10.20 亚克力</strong></div>
+                </div>
+                <p id="picker-result-note" class="result-note"></p>
+                <ul id="picker-result-warnings" class="result-warnings"></ul>
+            </section>
+        </div>
+    </div>
+
+    <div id="file-result-overlay" class="result-overlay" hidden>
+        <div id="file-result-dialog" class="result-dialog" role="dialog" aria-modal="true" aria-labelledby="file-result-title" tabindex="-1">
+            <div class="result-header">
+                <h2 id="file-result-title">检测结果</h2>
+                <button id="file-result-close" class="result-close" type="button" aria-label="关闭检测结果">×</button>
+            </div>
+            <div id="file-result-file" class="result-file"></div>
+            <div id="file-result-state" class="result-state" aria-live="polite">正在检测…</div>
+            <div id="file-result-distance" class="result-distance">距离：—</div>
+            <div class="result-metrics">
+                <div class="result-metric"><span>有效事件</span><strong id="file-result-events">—</strong></div>
+                <div class="result-metric"><span>波形数量</span><strong id="file-result-waveforms">—</strong></div>
+                <div class="result-metric"><span>采样条件</span><strong id="file-result-quality">—</strong></div>
+                <div class="result-metric"><span>预测依据</span><strong id="file-result-dataset">10.20 亚克力</strong></div>
+            </div>
+            <p id="file-result-note" class="result-note">请稍候，正在读取信号文件。</p>
+            <ul id="file-result-warnings" class="result-warnings"></ul>
+        </div>
+    </div>
+
+    <script>
+        const REFRESH_INTERVAL = 3000;
+        let captureWatch = null;
+        let lastObservedCaptureStatus = null;
+        let fileListInitialized = false;
+        let knownPridbNames = new Set();
+        let captureConfirmResolve = null;
+        let captureConfirmReturnFocus = null;
+        const captureToastQueue = [];
+        let captureToastVisible = false;
+        let captureToastTimer = null;
+        let captureToastRemaining = 3000;
+        let captureToastStartedAt = 0;
+
+        function updateStatus(status) {
+            const statusEl = document.getElementById('status');
+            if (status === 'running') {
+                statusEl.innerHTML = '状态：正在运行... 🟢';
+                statusEl.className = 'status-running';
+            } else {
+                statusEl.innerHTML = '状态：已停止 🔴';
+                statusEl.className = 'status-stopped';
+            }
+        }
+
+        async function fetchInfo() {
+            try {
+                const response = await fetch('/api/info');
+                const data = await response.json();
+                updateStatus(data.status);
+                observeCaptureStatus(data.status);
+                const container = document.getElementById('log-container');
+                container.innerText = data.logs || (data.status === 'running'
+                    ? '采集已启动，等待运行日志…' : '暂无运行日志');
+                container.scrollTop = container.scrollHeight;
+            } catch (error) {
+                console.error('获取信息失败', error);
+            }
+        }
+
+        function usePredictionPreset() {
+            document.getElementById('set-samplerate').value = '2000000';
+            document.getElementById('set-threshold').value = '0';
+            document.getElementById('set-hp').value = '20';
+            document.getElementById('set-lp').value = '300';
+            document.getElementById('set-ddt').value = '100000';
+            document.getElementById('set-pretrigger').value = '20';
+            document.getElementById('set-preamp-gain').value = '0';
+            document.getElementById('prediction-preset-note').textContent =
+                '已填写六项实验参数；点击「启动程序」才会保存并尝试采集。DDT 100,000 µs 理论上约每条 200,000 点，接近缓冲上限，可能丢失波形；当前程序未将 Pretrigger 和增益下发硬件，连续模式的阈值仅用于软件特征计算。请实测新文件的波形点数和预测结果。';
+        }
+
+        function confirmCapture(action) {
+            if (captureConfirmResolve) return Promise.resolve(false);
+            const overlay = document.getElementById('capture-confirm-overlay');
+            const accept = document.getElementById('capture-confirm-accept');
+            captureConfirmReturnFocus = document.activeElement;
+            document.getElementById('capture-confirm-title').textContent = action === 'start' ? '确认开始采集' : '确认停止采集';
+            document.getElementById('capture-confirm-message').textContent = action === 'start'
+                ? '确定使用当前参数开始采集吗？' : '确定停止当前采集吗？';
+            accept.textContent = action === 'start' ? '开始采集' : '停止采集';
+            accept.dataset.action = action;
+            overlay.hidden = false;
+            accept.focus();
+            return new Promise(resolve => { captureConfirmResolve = resolve; });
+        }
+
+        function closeCaptureConfirm(accepted) {
+            const resolve = captureConfirmResolve;
+            if (!resolve) return;
+            captureConfirmResolve = null;
+            document.getElementById('capture-confirm-overlay').hidden = true;
+            if (captureConfirmReturnFocus && captureConfirmReturnFocus.isConnected) captureConfirmReturnFocus.focus();
+            captureConfirmReturnFocus = null;
+            resolve(accepted);
+        }
+
+        document.getElementById('capture-confirm-accept').addEventListener('click', () => closeCaptureConfirm(true));
+        document.getElementById('capture-confirm-cancel').addEventListener('click', () => closeCaptureConfirm(false));
+        document.getElementById('capture-confirm-overlay').addEventListener('click', function (event) {
+            if (event.target === this) closeCaptureConfirm(false);
+        });
+
+        function beginCaptureWatch(phase) {
+            captureWatch = {
+                phase,
+                baseline: fileListInitialized
+                    ? new Set(knownPridbNames) : null,
+                queued: new Set(),
+                deadline: 0
+            };
+            return captureWatch;
+        }
+
+        function finishCaptureWatch() {
+            if (!captureWatch || captureWatch.phase !== 'running') return;
+            captureWatch.phase = 'finished';
+            captureWatch.deadline = Date.now() + 30000;
+            void loadFileList(true);
+        }
+
+        function observeCaptureStatus(status) {
+            const previous = lastObservedCaptureStatus;
+            lastObservedCaptureStatus = status;
+            if (status === 'running' && previous !== 'running'
+                    && (!captureWatch || captureWatch.phase === 'finished')) {
+                beginCaptureWatch('running');
+            } else if (status === 'stopped') {
+                finishCaptureWatch();
+            }
+        }
+
+        function captureFileListUpdated() {
+            fileListInitialized = true;
+            const watch = captureWatch;
+            if (!watch) return;
+            if (watch.baseline === null) {
+                watch.baseline = new Set(knownPridbNames);
+                return;
+            }
+            if (watch.phase !== 'finished') return;
+            if (Date.now() > watch.deadline) {
+                if (captureWatch === watch) captureWatch = null;
+                return;
+            }
+            predictionFilePairs.slice().reverse().forEach(pair => {
+                const name = pair.pridb.name;
+                if (watch.baseline.has(name) || watch.queued.has(name)) return;
+                watch.queued.add(name);
+                void fetchCaptureResult(name, watch.deadline);
+            });
+        }
+
+        async function fetchCaptureResult(filename, deadline) {
+            let data = null;
+            try {
+                while (true) {
+                    const response = await fetch('/api/prediction/file/' + encodeURIComponent(filename));
+                    data = await response.json();
+                    const retry = response.status === 409 || data.status === 'temporarily_unavailable'
+                        || data.status === 'prediction_read_error';
+                    if (!retry || Date.now() >= deadline) break;
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                }
+            } catch (error) {
+                data = { status: 'request_failed', result: { distanceText: '检测请求失败：' + String(error) } };
+            }
+            captureToastQueue.push({ filename, data });
+            showNextCaptureToast();
+        }
+
+        function pauseCaptureToast() {
+            if (captureToastTimer === null) return;
+            clearTimeout(captureToastTimer);
+            captureToastTimer = null;
+            captureToastRemaining = Math.max(0, captureToastRemaining - (Date.now() - captureToastStartedAt));
+        }
+
+        function resumeCaptureToast() {
+            if (!captureToastVisible || captureToastTimer !== null) return;
+            captureToastStartedAt = Date.now();
+            captureToastTimer = setTimeout(closeCaptureToast, captureToastRemaining);
+        }
+
+        function closeCaptureToast() {
+            pauseCaptureToast();
+            document.getElementById('capture-toast').hidden = true;
+            captureToastVisible = false;
+            showNextCaptureToast();
+        }
+
+        function showNextCaptureToast() {
+            if (captureToastVisible || captureToastQueue.length === 0) return;
+            const item = captureToastQueue.shift();
+            const data = item.data || {};
+            const result = data.result || {};
+            const quality = data.quality || {};
+            const experimental = quality.predictionMode === 'experimental_20k_rms';
+            const extrapolated = result.distanceCm > 50 && result.distanceCm < 60;
+            document.getElementById('capture-toast-file').textContent = item.filename;
+            document.getElementById('capture-toast-distance').textContent = result.distanceCm == null
+                ? '距离：—' : (extrapolated ? '未标定外推：约 ' : experimental ? '实验估算：约 ' : '距离：约 ')
+                    + result.distanceCm + ' cm';
+            document.getElementById('capture-toast-state').textContent = result.distanceText
+                || (result.hasPartialDischarge === true ? '检测到疑似局放信号'
+                    : result.hasPartialDischarge === false ? '未检出明显局放信号' : data.status || '暂无检测结果');
+            document.getElementById('capture-toast-warning').textContent = (quality.warnings || [])[0] || '';
+            document.getElementById('capture-toast').hidden = false;
+            captureToastVisible = true;
+            captureToastRemaining = 3000;
+            resumeCaptureToast();
+        }
+
+        document.getElementById('capture-toast').addEventListener('mouseenter', pauseCaptureToast);
+        document.getElementById('capture-toast').addEventListener('mouseleave', resumeCaptureToast);
+        document.getElementById('capture-toast-close').addEventListener('click', closeCaptureToast);
+
+        async function startProgram() {
+            if (!await confirmCapture('start')) return;
+            await loadFileList(true);
+            const watch = beginCaptureWatch('starting');
+
+            const configData = {
+    	sample_rate: parseInt(document.getElementById('set-samplerate').value),
+   	 threshold_db: parseFloat(document.getElementById('set-threshold').value),
+    	filter_hp_khz: parseFloat(document.getElementById('set-hp').value),
+    	filter_lp_khz: parseFloat(document.getElementById('set-lp').value),
+   	 ddt_us: parseInt(document.getElementById('set-ddt').value),
+   	 pretrigger: parseInt(document.getElementById('set-pretrigger').value),
+    	preamp_gain: parseFloat(document.getElementById('set-preamp-gain').value)
+	};
+
+
+            const logContainer = document.getElementById('log-container');
+            logContainer.textContent = '正在启动采集，等待运行日志…';
+            logContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(configData)
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    if (captureWatch === watch) captureWatch = null;
+                    logContainer.textContent = data.message || '启动失败';
+                    return;
+                }
+                watch.phase = 'running';
+                await fetchInfo();
+            } catch (error) {
+                if (captureWatch === watch) captureWatch = null;
+                logContainer.textContent = '启动失败：无法连接网页服务';
+            }
+        }
+
+        async function stopProgram() {
+            if (!await confirmCapture('stop')) return;
+            try {
+                const response = await fetch('/api/stop', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) {
+                    document.getElementById('log-container').textContent = data.message || '停止失败';
+                    return;
+                }
+                finishCaptureWatch();
+                await fetchInfo();
+            } catch (error) {
+                document.getElementById('log-container').textContent = '停止失败：无法连接网页服务';
+            }
+        }
+
+        async function deleteFile(filename) {
+            const decodedName = decodeURIComponent(filename);
+            if (!confirm(`⚠️ 警告：确定要彻底删除文件【${decodedName}】吗？此操作不可恢复！`)) return;
+
+            try {
+                const response = await fetch(`/api/delete/${filename}`, { method: 'POST' });
+                const data = await response.json();
+                alert(data.message);
+                loadFileList();
+            } catch (error) {
+                alert('删除请求发送失败');
+            }
+        }
+
+        function getSelectedFiles() {
+            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+
+        function setSelectAll(checked) {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checked;
+            });
+        }
+
+        function syncSelectAllCheckbox() {
+            const allCheckboxes = document.querySelectorAll('.file-checkbox');
+            const checkedBoxes = document.querySelectorAll('.file-checkbox:checked');
+            const selectAll = document.getElementById('select-all-checkbox');
+
+            if (allCheckboxes.length === 0) {
+                selectAll.checked = false;
+                return;
+            }
+
+            selectAll.checked = allCheckboxes.length === checkedBoxes.length;
+        }
+
+        function toggleSelectAll() {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            if (checkboxes.length === 0) return;
+
+            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+            checkboxes.forEach(cb => {
+                cb.checked = !allChecked;
+            });
+            syncSelectAllCheckbox();
+        }
+
+        async function deleteSelected() {
+            const filenames = getSelectedFiles();
+
+            if (filenames.length === 0) {
+                alert('请先选择要删除的文件');
+                return;
+            }
+
+            if (!confirm(`⚠️ 确定要删除选中的 ${filenames.length} 个文件吗？此操作不可恢复！`)) return;
+
+            try {
+                const response = await fetch('/api/delete_selected', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames })
+                });
+
+                const data = await response.json();
+                alert(data.message);
+                loadFileList();
+            } catch (error) {
+                alert('批量删除失败');
+            }
+        }
+
+        async function downloadSelected() {
+            const filenames = getSelectedFiles();
+
+            if (filenames.length === 0) {
+                alert('请先选择要下载的文件');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/download_selected', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames })
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    alert(data.message || '批量下载失败');
+                    return;
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'selected_files.zip';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+            } catch (error) {
+                alert('批量下载失败');
+            }
+        }
+
+        let fileListSignature = null;
+        let predictionFilePairs = [];
+        let selectedPredictionFile = null;
+        let pickerBusyRequest = 0;
+        let pickerListSignature = null;
+
+        function invalidatePickerResult() {
+            ++fileResultRequest;
+            pickerBusyRequest = 0;
+            document.getElementById('picker-result').hidden = true;
+        }
+
+        function getPredictionFilePairs(files) {
+            const byName = new Map(files.map(file => [file.name, file]));
+            return files
+                .filter(file => file.name.endsWith('.pridb'))
+                .map(pridb => ({
+                    pridb,
+                    tradb: byName.get(pridb.name.slice(0, -6) + '.tradb')
+                }))
+                .filter(pair => pair.tradb)
+                .sort((a, b) => Number(b.pridb.mtime || 0) - Number(a.pridb.mtime || 0)
+                    || b.pridb.name.localeCompare(a.pridb.name));
+        }
+
+        function renderPredictionFilePicker() {
+            const list = document.getElementById('file-picker-list');
+            const empty = document.getElementById('file-picker-empty');
+            const runButton = document.getElementById('file-picker-run');
+            const query = document.getElementById('file-picker-search').value.trim().toLowerCase();
+            const matches = predictionFilePairs.filter(pair =>
+                pair.pridb.name.toLowerCase().includes(query)
+                || pair.tradb.name.toLowerCase().includes(query)
+            );
+            if (!matches.some(pair => pair.pridb.name === selectedPredictionFile)) {
+                const previousSelection = selectedPredictionFile;
+                selectedPredictionFile = matches.length ? matches[0].pridb.name : null;
+                if (previousSelection !== selectedPredictionFile) {
+                    invalidatePickerResult();
+                }
+            }
+            empty.hidden = matches.length !== 0;
+            runButton.disabled = !selectedPredictionFile || pickerBusyRequest !== 0;
+            const signature = JSON.stringify([query, selectedPredictionFile,
+                matches.map(pair => [pair.pridb.name, pair.pridb.mtime])]);
+            if (signature === pickerListSignature) return;
+            pickerListSignature = signature;
+            list.replaceChildren();
+            matches.forEach(pair => {
+                const option = document.createElement('button');
+                option.className = 'picker-file-option';
+                option.type = 'button';
+                option.setAttribute('aria-pressed', String(pair.pridb.name === selectedPredictionFile));
+                option.dataset.filename = pair.pridb.name;
+
+                const name = document.createElement('span');
+                name.textContent = pair.pridb.name;
+                const details = document.createElement('small');
+                const timestamp = Number(pair.pridb.mtime);
+                const dateText = Number.isFinite(timestamp) && timestamp > 0
+                    ? new Date(timestamp * 1000).toLocaleString() : '时间未知';
+                details.textContent = dateText + ' · .pridb / .tradb 已配对';
+                option.append(name, details);
+                option.addEventListener('click', function () {
+                    selectedPredictionFile = pair.pridb.name;
+                    invalidatePickerResult();
+                    document.getElementById('file-picker-run').disabled = false;
+                    list.querySelectorAll('.picker-file-option').forEach(item =>
+                        item.setAttribute('aria-pressed', String(item === option))
+                    );
+                    pickerListSignature = JSON.stringify([query, selectedPredictionFile,
+                        matches.map(item => [item.pridb.name, item.pridb.mtime])]);
+                });
+                list.appendChild(option);
+            });
+        }
+
+        function openFilePicker() {
+            const overlay = document.getElementById('file-picker-overlay');
+            document.getElementById('file-picker-search').value = '';
+            invalidatePickerResult();
+            renderPredictionFilePicker();
+            overlay.hidden = false;
+            document.body.style.overflow = 'hidden';
+            document.getElementById('file-picker-search').focus();
+        }
+
+        function closeFilePicker() {
+            const overlay = document.getElementById('file-picker-overlay');
+            if (overlay.hidden) return;
+            overlay.hidden = true;
+            document.body.style.overflow = '';
+            invalidatePickerResult();
+            document.getElementById('open-file-picker').focus();
+        }
+
+        document.getElementById('file-picker-close').addEventListener('click', closeFilePicker);
+        document.getElementById('file-picker-overlay').addEventListener('click', function (event) {
+            if (event.target === this) closeFilePicker();
+        });
+        document.getElementById('file-picker-search').addEventListener('input', function () {
+            invalidatePickerResult();
+            renderPredictionFilePicker();
+        });
+        document.getElementById('file-picker-run').addEventListener('click', function () {
+            if (!selectedPredictionFile) return;
+            const pair = predictionFilePairs.find(item => item.pridb.name === selectedPredictionFile);
+            if (!pair) return;
+            showFileResult(pair.pridb.name, pair.pridb.name, this, 'picker-result');
+        });
+
+        async function loadFileList(force = false) {
+            try {
+                const response = await fetch('/api/files?t=' + new Date().getTime());
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                const files = await response.json();
+                if (!Array.isArray(files)) throw new Error('文件列表格式错误');
+                knownPridbNames = new Set(files.filter(file => file.name.endsWith('.pridb')).map(file => file.name));
+                predictionFilePairs = getPredictionFilePairs(files);
+                captureFileListUpdated();
+                const displayFiles = files.filter(file => /\.(pridb|tradb)$/.test(file.name));
+                const fileListBody = document.getElementById('file-list');
+                const selectAll = document.getElementById('select-all-checkbox');
+                const signature = JSON.stringify(displayFiles.map(file => [file.name, file.size, file.mtime]));
+                if (!force && signature === fileListSignature) {
+                    if (!document.getElementById('file-picker-overlay').hidden) renderPredictionFilePicker();
+                    return true;
+                }
+                fileListSignature = signature;
+                const selected = new Set(getSelectedFiles());
+
+                fileListBody.innerHTML = '';
+                selectAll.checked = false;
+
+                if (displayFiles.length === 0) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td colspan="4" class="empty-row">暂无 .pridb / .tradb 数据文件</td>
+                    `;
+                    fileListBody.appendChild(row);
+                    if (!document.getElementById('file-picker-overlay').hidden) renderPredictionFilePicker();
+                    return true;
+                }
+
+                displayFiles.forEach(file => {
+                    const encodedName = encodeURIComponent(file.name);
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td class="checkbox-cell">
+                            <input type="checkbox" class="file-checkbox" value="${file.name}">
+                        </td>
+                        <td class="file-name">${file.name}</td>
+                        <td>${file.size}</td>
+                        <td>
+                            <a class="btn-download" href="/download/${encodedName}" target="_blank">⬇️ 下载</a>
+                            <button class="btn-delete" onclick="deleteFile('${encodedName}')">🗑️ 删除</button>
+                        </td>
+                    `;
+                    row.querySelector('.file-checkbox').checked = selected.has(file.name);
+                    if (file.name.endsWith('.pridb') || file.name.endsWith('.tradb')) {
+                        const predictionFile = file.name.endsWith('.tradb')
+                            ? file.name.slice(0, -6) + '.pridb' : file.name;
+                        const resultButton = document.createElement('button');
+                        resultButton.className = 'btn-predict';
+                        resultButton.type = 'button';
+                        resultButton.textContent = '🔎 检测结果';
+                        resultButton.addEventListener('click', function () {
+                            showFileResult(predictionFile, file.name, resultButton);
+                        });
+                        row.querySelector('td:last-child').appendChild(resultButton);
+                    }
+                    fileListBody.appendChild(row);
+                });
+
+                document.querySelectorAll('.file-checkbox').forEach(cb => {
+                    cb.addEventListener('change', syncSelectAllCheckbox);
+                });
+                syncSelectAllCheckbox();
+                if (!document.getElementById('file-picker-overlay').hidden) renderPredictionFilePicker();
+                return true;
+            } catch (error) {
+                console.error('加载文件列表失败:', error);
+                return false;
+            }
+        }
+
+        let fileResultRequest = 0;
+        let fileResultReturnFocus = null;
+        const fileResultOverlay = document.getElementById('file-result-overlay');
+
+        function closeFileResult() {
+            if (fileResultOverlay.hidden) return;
+            fileResultOverlay.hidden = true;
+            document.body.style.overflow = '';
+            ++fileResultRequest;
+            if (fileResultReturnFocus && fileResultReturnFocus.isConnected) {
+                fileResultReturnFocus.focus();
+            }
+        }
+
+        document.getElementById('file-result-close').addEventListener('click', closeFileResult);
+        fileResultOverlay.addEventListener('click', function (event) {
+            if (event.target === fileResultOverlay) closeFileResult();
+        });
+        document.addEventListener('keydown', function (event) {
+            const confirmOverlay = document.getElementById('capture-confirm-overlay');
+            if (!confirmOverlay.hidden && event.key === 'Escape') {
+                closeCaptureConfirm(false);
+                return;
+            }
+            if (event.key === 'Escape' && !document.getElementById('file-picker-overlay').hidden) {
+                closeFilePicker();
+                return;
+            }
+            if (event.key === 'Escape' && !fileResultOverlay.hidden) closeFileResult();
+            if (event.key === 'Tab') {
+                const dialog = !confirmOverlay.hidden ? document.getElementById('capture-confirm-dialog')
+                    : !fileResultOverlay.hidden ? document.getElementById('file-result-dialog')
+                    : !document.getElementById('file-picker-overlay').hidden
+                        ? document.getElementById('file-picker-dialog') : null;
+                if (!dialog) return;
+                const controls = Array.from(dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]'))
+                    .filter(element => element.getClientRects().length);
+                const first = controls[0];
+                const last = controls[controls.length - 1];
+                if (event.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) {
+                    event.preventDefault();
+                    last?.focus();
+                } else if (!event.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) {
+                    event.preventDefault();
+                    first?.focus();
+                }
+            }
+        });
+
+        async function showFileResult(pridbName, selectedName, button, resultPrefix = 'file-result') {
+            const requestId = ++fileResultRequest;
+            const standalone = resultPrefix === 'file-result';
+            const state = document.getElementById(resultPrefix + '-state');
+            const distance = document.getElementById(resultPrefix + '-distance');
+            const note = document.getElementById(resultPrefix + '-note');
+            const warningList = document.getElementById(resultPrefix + '-warnings');
+            if (standalone) {
+                fileResultReturnFocus = button;
+                fileResultOverlay.hidden = false;
+                document.body.style.overflow = 'hidden';
+                document.getElementById('file-result-dialog').focus();
+            } else {
+                pickerBusyRequest = requestId;
+                document.getElementById(resultPrefix).hidden = false;
+            }
+            document.getElementById(resultPrefix + '-file').textContent = '信号文件：' + selectedName;
+            state.textContent = '正在检测…';
+            state.dataset.tone = 'normal';
+            distance.textContent = '距离：计算中…';
+            document.getElementById(resultPrefix + '-events').textContent = '—';
+            document.getElementById(resultPrefix + '-waveforms').textContent = '—';
+            document.getElementById(resultPrefix + '-quality').textContent = '—';
+            document.getElementById(resultPrefix + '-dataset').textContent = '10.20 亚克力';
+            note.textContent = '请稍候，正在读取信号文件。';
+            warningList.replaceChildren();
+            button.disabled = true;
+
+            try {
+                const response = await fetch('/api/prediction/file/' + encodeURIComponent(pridbName));
+                const data = await response.json();
+                if (requestId !== fileResultRequest) return;
+                const result = data.result || {};
+                const quality = data.quality || {};
+                const experimental = quality.predictionMode === 'experimental_20k_rms';
+                const extrapolated = result.distanceCm > 50 && result.distanceCm < 60;
+                state.textContent = experimental ? '当前采集数据与 10.20 标准库窗长不匹配（20,000 点 / 200,000 点）'
+                    : quality.waveformCompatible === false ? '当前采集数据与 10.20 标准库不匹配，无法预测距离'
+                    : extrapolated ? '50–60 cm 未标定外推，须用已知距离复核'
+                    : result.hasPartialDischarge === true ? '检测到疑似局放信号'
+                    : result.hasPartialDischarge === false ? '未检出明显局放信号'
+                    : (result.distanceText || '暂无法判定');
+                state.dataset.tone = !response.ok ? (response.status === 409 ? 'warning' : 'error')
+                    : (result.distanceCm == null || experimental) ? 'warning' : 'normal';
+                distance.textContent = result.distanceCm == null
+                    ? '距离：—' : (extrapolated ? '未标定外推：约 ' : experimental ? '实验估算：约 ' : '距离：约 ') + result.distanceCm + ' cm';
+                document.getElementById(resultPrefix + '-events').textContent =
+                    typeof data.eventCount === 'number' ? data.eventCount : '—';
+                document.getElementById(resultPrefix + '-waveforms').textContent =
+                    typeof data.waveformCount === 'number' ? data.waveformCount : '—';
+                document.getElementById(resultPrefix + '-quality').textContent =
+                    experimental ? '窗长不匹配（20,000 / 200,000 点）'
+                    : extrapolated ? '波形匹配，距离未标定'
+                    : quality.waveformCompatible === true ? '匹配'
+                    : quality.waveformCompatible === false ? '不匹配' : '待验证';
+                document.getElementById(resultPrefix + '-dataset').textContent = data.modelDataset || '10.20 亚克力';
+                note.textContent = (experimental ? '仅提供 RMS 实验估算（未现场验证）。' : '')
+                    + (result.distanceText || '暂无详细说明')
+                    + ' ｜状态：' + (data.status || response.status)
+                    + '。预测结果仅作临时参考。';
+                (quality.warnings || []).forEach(function (warning) {
+                    const item = document.createElement('li');
+                    item.textContent = warning;
+                    warningList.appendChild(item);
+                });
+                if (!standalone) {
+                    document.getElementById(resultPrefix).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            } catch (error) {
+                if (requestId === fileResultRequest) {
+                    state.textContent = '检测请求失败';
+                    state.dataset.tone = 'error';
+                    distance.textContent = '距离：—';
+                    note.textContent = String(error);
+                }
+            } finally {
+                if (standalone) {
+                    button.disabled = false;
+                } else if (pickerBusyRequest === requestId) {
+                    pickerBusyRequest = 0;
+                    button.disabled = !selectedPredictionFile;
+                }
+            }
+        }
+
+        async function fetchPrediction() {
+            const summary = document.getElementById('prediction-summary');
+            const distance = document.getElementById('prediction-distance');
+            const detail = document.getElementById('prediction-detail');
+            const warningList = document.getElementById('prediction-warnings');
+            try {
+                const response = await fetch('/api/prediction/latest?t=' + Date.now());
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                const data = await response.json();
+                const result = data.result || {};
+                const warnings = (data.quality && data.quality.warnings) || [];
+                if (data.capturing !== true) {
+                    summary.textContent = '当前未采集，连接设备并启动采集后显示实时结果';
+                    distance.textContent = '距离：—';
+                    detail.textContent = '历史文件可在「数据文件管理」中选择并查看检测结果';
+                    warningList.replaceChildren();
+                    return;
+                }
+                const experimental = data.quality && data.quality.predictionMode === 'experimental_20k_rms';
+                const extrapolated = result.distanceCm > 50 && result.distanceCm < 60;
+                const nearField = ['near_source_point', 'near_10cm_or_near_field', 'near_10cm_boundary'].includes(data.status);
+                summary.textContent = extrapolated ? '50–60 cm 未标定外推，须用已知距离复核'
+                    : nearField ? (result.distanceText || '近场 0–10 cm，暂无细分标定')
+                    : experimental ? '当前采集数据与 10.20 标准库窗长不匹配（20,000 点 / 200,000 点）；仅提供 RMS 实验估算（未现场验证）'
+                    : data.quality && data.quality.waveformCompatible === false ? '当前采集数据与 10.20 标准库不匹配，无法预测距离'
+                    : result.hasPartialDischarge === true ? '疑似局放信号（临时估算）'
+                    : result.hasPartialDischarge === false ? '未检出超过阈值的明显信号；不能排除远距离弱信号'
+                    : '暂无法判定：' + (result.distanceText || '等待数据');
+                distance.textContent = result.distanceCm == null ? '距离：—'
+                    : (extrapolated ? '未标定外推：约 ' : experimental ? '实验估算：约 ' : '距离：约 ') + result.distanceCm + ' cm';
+                detail.textContent = '文件：' + (data.sourceFile || '—')
+                    + ' ｜有效事件：' + (data.eventCount || 0)
+                    + ' ｜波形：' + (data.waveformCount || 0)
+                    + ' ｜状态：采集中';
+                warningList.replaceChildren();
+                warnings.forEach(function (warning) {
+                    const item = document.createElement('li');
+                    item.textContent = warning;
+                    warningList.appendChild(item);
+                });
+            } catch (error) {
+                summary.textContent = '预测服务暂不可用';
+                distance.textContent = '距离：—';
+                detail.textContent = '无法获取实时状态';
+                warningList.replaceChildren();
+            }
+        }
+
+        fetchInfo();
+        loadFileList();
+        fetchPrediction();
+        setInterval(fetchInfo, REFRESH_INTERVAL);
+        setInterval(loadFileList, 5000);
+        setInterval(fetchPrediction, 5000);
+    </script>
+</body>
+</html>

@@ -13,5 +13,7 @@ void WebServer_SendLog(const char* msg);
 /* 协同视觉纠偏: 推送 0x88 状态帧 与 0x89 视觉 JSON */
 void WebServer_PushAlignState(void);
 void WebServer_PushAlignJson(const char* json);
+/* AE 距离结果 0x8A (6 字节, 见 auto_mode.h) */
+void WebServer_PushAeDistance(void);
 
 #endif

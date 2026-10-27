@@ -1,0 +1,61 @@
+{
+  "formula_log10_rms": "2.270016 - 0.021525 * distance_cm",
+  "inverse_distance_cm": "(2.270016 - log10(rms_median)) / 0.021525",
+  "fit_distances_cm": [
+    10,
+    20,
+    30,
+    40,
+    50
+  ],
+  "valid_n": 21,
+  "mae_cm": 1.3862061760330486,
+  "max_abs_error_cm": 6.473373875516958,
+  "formula_log10_energy": "5.539977 - 0.043045 * distance_cm",
+  "inverse_distance_from_energy_cm": "(5.539977 - log10(energy_median)) / 0.043045",
+  "rms_fit_intercept": 2.2700161190117463,
+  "rms_fit_slope": -0.021525178232527118,
+  "energy_fit_intercept": 5.539976957710822,
+  "energy_fit_slope": -0.043045342229001006,
+  "dataset": "10.20亚克力",
+  "noise_rms_median": 8.8735744,
+  "initial_detection_threshold_rms_median": 11.1849,
+  "rms_reference_ranges": [
+    {
+      "distance_cm": 0,
+      "min": 2691.776512,
+      "max": 4310.9482496,
+      "median": 3244.7234048
+    },
+    {
+      "distance_cm": 10,
+      "min": 86.44853760000001,
+      "max": 156.352512,
+      "median": 118.7741696
+    },
+    {
+      "distance_cm": 20,
+      "min": 56.0103424,
+      "max": 72.0928768,
+      "median": 64.6643712
+    },
+    {
+      "distance_cm": 30,
+      "min": 40.9665536,
+      "max": 43.5093504,
+      "median": 42.3821312
+    },
+    {
+      "distance_cm": 40,
+      "min": 24.199168,
+      "max": 28.534374399999997,
+      "median": 25.6966656
+    },
+    {
+      "distance_cm": 50,
+      "min": 14.0148736,
+      "max": 19.2282624,
+      "median": 15.807283199999999
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=AE UART distance service (SpotWave + Pi serial to child)
+After=multi-user.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/ae_project
+Environment=AE_UART_PORT=/dev/serial0
+Environment=AE_UART_BAUD=115200
+ExecStart=/usr/bin/python3 /home/pi/ae_project/ae_uart_service.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

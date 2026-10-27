@@ -36,6 +36,12 @@
   var ALIGN_STATE_CMD = 0x88;
   var ALIGN_JSON_CMD  = 0x89;
   var ALIGN_STATE_LEN = 11;
+  /* AE 距离 0x8A: [cm×10 i16][near u8][pd u8][st u8][seq u8] */
+  var AE_DIST_CMD = 0x8A;
+  var AE_DIST_LEN = 6;
+  var AE_ST_TEXT = {
+    0: 'ok', 1: '事件不足', 2: '采样不符', 3: '错误', 4: '忙', 5: '未检出局放'
+  };
   var ALIGN_STATE_TEXT = {
     0: '空闲', 1: '记参考中', 2: '测量中', 3: '参考已就绪',
     4: '参考失败', 5: '测量完成', 6: '测量失败',
@@ -192,6 +198,26 @@
     return text;
   }
 
+  /* 0x8A: AE 距离结果 */
+  function parseAeDistance(frame) {
+    var f = parseFrame(frame);
+    if (!f || f.cmd !== AE_DIST_CMD || f.payload.length < AE_DIST_LEN) return null;
+    var p = f.payload;
+    var dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    var cmx = dv.getInt16(0, true);
+    var near = p[2];
+    var pd = p[3];
+    var st = p[4];
+    return {
+      cm: cmx === 0x7FFF ? null : cmx / 10,
+      nearCm: near === 0xFF ? null : near,
+      pd: pd === 0xFF ? null : !!pd,
+      status: st,
+      statusText: AE_ST_TEXT[st] || ('st' + st),
+      seq: p[5]
+    };
+  }
+
   function uint8ArrayToHex(bytes) {
     var out = [];
     for (var i = 0; i < bytes.length; i++) {
@@ -219,6 +245,8 @@
     ALIGN_STATE_TEXT: ALIGN_STATE_TEXT,
     parseAlignState: parseAlignState,
     parseAlignJson: parseAlignJson,
+    AE_DIST_CMD: AE_DIST_CMD,
+    parseAeDistance: parseAeDistance,
     uint8ArrayToHex: uint8ArrayToHex,
 
     canCmd: function (motorId, subCmd) {

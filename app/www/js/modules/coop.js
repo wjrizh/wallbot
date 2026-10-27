@@ -71,6 +71,12 @@
       laserPill
     ]));
 
+    var aeValue = UI.el('span', { class: 'mrow-value', text: '—' });
+    container.appendChild(UI.el('div', { class: 'mrow' }, [
+      UI.el('label', { class: 'mrow-label', text: 'AE距离' }),
+      aeValue
+    ]));
+
     this._els.stage = stageValue;
     this._els.alert = alertValue;
     this._els.round = roundValue;
@@ -79,10 +85,27 @@
     this._els.gnd = gndValue;
     this._els.laser = laserValue;
     this._els.laserPill = laserPill;
+    this._els.ae = aeValue;
 
     if (this.app && this.app.transport) {
       this.app.transport.on('alignState', function (s) { self._onAlignState(s); });
+      this.app.transport.on('aeDistance', function (d) { self._onAeDistance(d); });
     }
+  };
+
+  CoopModule.prototype._onAeDistance = function (d) {
+    if (!d || !this._els.ae) return;
+    var parts = [];
+    if (d.cm != null) parts.push(d.cm.toFixed(1) + ' cm');
+    else parts.push('无数值');
+    if (d.nearCm != null) parts.push('标准点 ' + d.nearCm + ' cm');
+    if (d.pd === true) parts.push('疑似局放');
+    else if (d.pd === false) parts.push('未检出');
+    if (d.statusText) parts.push(d.statusText);
+    var text = parts.join(' · ');
+    this._els.ae.textContent = text;
+    UI.log('AE距离: ' + text);
+    if (typeof UI.toast === 'function') UI.toast('AE: ' + text);
   };
 
   CoopModule.prototype._onAlignState = function (s) {

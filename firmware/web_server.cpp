@@ -414,6 +414,24 @@ void WebServer_SendLog(const char* msg) {
     ws.binaryAll(frame, 6 + len);
 }
 
+/* 0x8A: AE 距离 (子机经 NRF 上送) */
+void WebServer_PushAeDistance(void) {
+    if (ws.count() == 0) return;
+    if (!AutoMode_HasAeResult()) return;
+    uint8_t pay[6];
+    AutoMode_FillAePayload(pay);
+    uint8_t frame[2 + 1 + 1 + 6 + 2];
+    frame[0] = 0xAA; frame[1] = 0x55;
+    frame[2] = 0x8A;
+    frame[3] = 6;
+    memcpy(&frame[4], pay, 6);
+    uint16_t crc = crc16(frame, 10);
+    frame[10] = crc & 0xFF;
+    frame[11] = (crc >> 8) & 0xFF;
+    ws.binaryAll(frame, 12);
+    AutoMode_ClearAeFresh();
+}
+
 /* 0x88: 协同视觉纠偏状态 (auto_mode 填充) */
 void WebServer_PushAlignState(void) {
     if (ws.count() == 0) return;

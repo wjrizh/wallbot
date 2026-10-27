@@ -107,6 +107,8 @@ void JoypadSender_Task(void *pvParameters) {
 
         /* 发完切回 RX, 下一轮才能收到子机应答 */
         NRF_StartListening();
+        /* 协同时 AE 在 recv_match* 里收; 非协同时这里抽 'D' 补发结果 */
+        AutoMode_PollAeRx();
 
         vTaskDelayUntil(&xLastWakeTime, period);
     }

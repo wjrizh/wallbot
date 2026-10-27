@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpotWave 控制面板</title>
+    <style>
+        body { font-family: sans-serif; background-color: #f4f4f4; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        .controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .file-actions { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+        button { padding: 8px 16px; font-size: 14px; cursor: pointer; border: none; border-radius: 4px; color: white; transition: background 0.3s; }
+        .btn-start { background-color: #28a745; font-size: 16px; padding: 10px 20px; }
+        .btn-start:hover { background-color: #218838; }
+        .btn-stop { background-color: #dc3545; font-size: 16px; padding: 10px 20px; }
+        .btn-stop:hover { background-color: #c82333; }
+        .btn-refresh { background-color: #007bff; margin-bottom: 10px; }
+        .btn-refresh:hover { background-color: #0069d9; }
+        .btn-delete { background-color: #dc3545; margin-left: 10px; }
+        .btn-delete:hover { background-color: #c82333; }
+        .btn-download { background-color: #17a2b8; text-decoration: none; padding: 8px 16px; border-radius: 4px; color: white; display: inline-block; border: none; cursor: pointer; }
+        .btn-download:hover { background-color: #138496; }
+        #status { text-align: center; font-weight: bold; margin-bottom: 10px; }
+        .status-running { color: #28a745; }
+        .status-stopped { color: #dc3545; }
+        #log-container { background: #222; color: #fff; padding: 15px; height: 300px; overflow-y: scroll; border-radius: 4px; font-family: monospace; font-size: 12px; margin-bottom: 20px; white-space: pre-wrap; }
+        .data-files { border-top: 1px solid #eee; padding-top: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        table, th, td { border: 1px solid #ddd; }
+        th, td { padding: 8px; text-align: left; vertical-align: middle; }
+        th { background-color: #f8f9fa; }
+        .checkbox-cell { text-align: center; width: 60px; }
+        .empty-row { text-align: center; color: #666; }
+        .hint-text { font-size: 12px; color: #666; margin-top: 8px; }
+        .file-name { word-break: break-all; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SpotWave 数据采集控制</h1>
+
+        <div id="status">加载中...</div>
+
+        <div class="settings-panel" style="background: #f8f9fa; padding: 15px; border-radius: 6px; margin-bottom: 20px; border: 1px solid #ddd;">
+            <h3 style="margin-top: 0; font-size: 16px;">⚙️ 采集参数设置</h3>
+            <table style="width: 100%; border: none;">
+                <tr>
+                    <td style="border: none; padding: 5px;">TR 采样率 (Sample rate):</td>
+                    <td style="border: none; padding: 5px;">
+                        <select id="set-samplerate" style="padding: 4px;">
+                            <option value="2000000"selected>2 MHz</option>
+                            <option value="1000000" >1 MHz</option>
+                            <option value="500000">500 kHz</option>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">触发阈值 (Threshold) [dB]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-threshold" value="40" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">硬件滤波 (Filter) [kHz]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-hp" value="20" style="padding: 4px; width: 60px;"> -
+                        <input type="number" id="set-lp" value="500" style="padding: 4px; width: 60px;">
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">持续时间锁定 (DDT) [µs]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-ddt" value="120" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+                <tr>
+	    <td style="border: none; padding: 5px;">Pretrigger [µs]:</td>
+	    <td style="border: none; padding: 5px;">
+	        <input type="number" id="set-pretrigger" value="34" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+                <tr>
+                    <td style="border: none; padding: 5px;">Preamp gain [dB]:</td>
+                    <td style="border: none; padding: 5px;">
+                        <input type="number" id="set-preamp-gain" value="20" style="padding: 4px; width: 80px;">
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <div class="controls">
+            <button class="btn-start" onclick="startProgram()">▶️ 启动程序</button>
+            <button class="btn-stop" onclick="stopProgram()">⏹️ 停止程序</button>
+        </div>
+
+        <h3>运行日志 (最新 50 行)</h3>
+        <div id="log-container"></div>
+
+        <div class="data-files">
+            <h3>数据文件管理</h3>
+
+            <div class="file-actions">
+                <button class="btn-refresh" onclick="loadFileList()">🔄 刷新文件列表</button>
+                <button class="btn-refresh" onclick="toggleSelectAll()">☑️ 全选/取消全选</button>
+                <button class="btn-download" onclick="downloadSelected()">⬇️ 下载所选</button>
+                <button class="btn-delete" onclick="deleteSelected()">🗑️ 删除所选</button>
+            </div>
+
+            <table id="file-table">
+                <thead>
+                    <tr>
+                        <th class="checkbox-cell">
+                            <input type="checkbox" id="select-all-checkbox" onclick="setSelectAll(this.checked)">
+                        </th>
+                        <th>文件名</th>
+                        <th>大小</th>
+                        <th style="width: 180px;">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="file-list">
+                </tbody>
+            </table>
+
+            <div class="hint-text">
+                批量下载会将所选文件打包为一个 ZIP 文件。
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const REFRESH_INTERVAL = 3000;
+
+        function updateStatus(status) {
+            const statusEl = document.getElementById('status');
+            if (status === 'running') {
+                statusEl.innerHTML = '状态：正在运行... 🟢';
+                statusEl.className = 'status-running';
+            } else {
+                statusEl.innerHTML = '状态：已停止 🔴';
+                statusEl.className = 'status-stopped';
+            }
+        }
+
+        async function fetchInfo() {
+            try {
+                const response = await fetch('/api/info');
+                const data = await response.json();
+                updateStatus(data.status);
+                document.getElementById('log-container').innerText = data.logs;
+                const container = document.getElementById('log-container');
+                container.scrollTop = container.scrollHeight;
+            } catch (error) {
+                console.error('获取信息失败', error);
+            }
+        }
+
+        async function startProgram() {
+            if (!confirm("确定要使用当前参数启动采集吗？")) return;
+
+            const configData = {
+    	sample_rate: parseInt(document.getElementById('set-samplerate').value),
+   	 threshold_db: parseFloat(document.getElementById('set-threshold').value),
+    	filter_hp_khz: parseFloat(document.getElementById('set-hp').value),
+    	filter_lp_khz: parseFloat(document.getElementById('set-lp').value),
+   	 ddt_us: parseInt(document.getElementById('set-ddt').value),
+   	 pretrigger: parseInt(document.getElementById('set-pretrigger').value),
+    	preamp_gain: parseFloat(document.getElementById('set-preamp-gain').value)
+	};
+
+
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(configData)
+                });
+                const data = await response.json();
+                alert(data.message);
+                fetchInfo();
+            } catch (error) {
+                alert('启动失败');
+            }
+        }
+
+        async function stopProgram() {
+            if (!confirm("确定要停止采集程序吗？")) return;
+            try {
+                const response = await fetch('/api/stop', { method: 'POST' });
+                const data = await response.json();
+                alert(data.message);
+                fetchInfo();
+            } catch (error) {
+                alert('停止失败');
+            }
+        }
+
+        async function deleteFile(filename) {
+            const decodedName = decodeURIComponent(filename);
+            if (!confirm(`⚠️ 警告：确定要彻底删除文件【${decodedName}】吗？此操作不可恢复！`)) return;
+
+            try {
+                const response = await fetch(`/api/delete/${filename}`, { method: 'POST' });
+                const data = await response.json();
+                alert(data.message);
+                loadFileList();
+            } catch (error) {
+                alert('删除请求发送失败');
+            }
+        }
+
+        function getSelectedFiles() {
+            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+
+        function setSelectAll(checked) {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checked;
+            });
+        }
+
+        function syncSelectAllCheckbox() {
+            const allCheckboxes = document.querySelectorAll('.file-checkbox');
+            const checkedBoxes = document.querySelectorAll('.file-checkbox:checked');
+            const selectAll = document.getElementById('select-all-checkbox');
+
+            if (allCheckboxes.length === 0) {
+                selectAll.checked = false;
+                return;
+            }
+
+            selectAll.checked = allCheckboxes.length === checkedBoxes.length;
+        }
+
+        function toggleSelectAll() {
+            const checkboxes = document.querySelectorAll('.file-checkbox');
+            if (checkboxes.length === 0) return;
+
+            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+            checkboxes.forEach(cb => {
+                cb.checked = !allChecked;
+            });
+            syncSelectAllCheckbox();
+        }
+
+        async function deleteSelected() {
+            const filenames = getSelectedFiles();
+
+            if (filenames.length === 0) {
+                alert('请先选择要删除的文件');
+                return;
+            }
+
+            if (!confirm(`⚠️ 确定要删除选中的 ${filenames.length} 个文件吗？此操作不可恢复！`)) return;
+
+            try {
+                const response = await fetch('/api/delete_selected', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames })
+                });
+
+                const data = await response.json();
+                alert(data.message);
+                loadFileList();
+            } catch (error) {
+                alert('批量删除失败');
+            }
+        }
+
+        async function downloadSelected() {
+            const filenames = getSelectedFiles();
+
+            if (filenames.length === 0) {
+                alert('请先选择要下载的文件');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/download_selected', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filenames })
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    alert(data.message || '批量下载失败');
+                    return;
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'selected_files.zip';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+            } catch (error) {
+                alert('批量下载失败');
+            }
+        }
+
+        async function loadFileList() {
+            try {
+                const response = await fetch('/api/files?t=' + new Date().getTime());
+                const files = await response.json();
+                const fileListBody = document.getElementById('file-list');
+                const selectAll = document.getElementById('select-all-checkbox');
+
+                fileListBody.innerHTML = '';
+                selectAll.checked = false;
+
+                if (!files || files.length === 0) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td colspan="4" class="empty-row">暂无数据文件</td>
+                    `;
+                    fileListBody.appendChild(row);
+                    return;
+                }
+
+                files.forEach(file => {
+                    const encodedName = encodeURIComponent(file.name);
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td class="checkbox-cell">
+                            <input type="checkbox" class="file-checkbox" value="${file.name}">
+                        </td>
+                        <td class="file-name">${file.name}</td>
+                        <td>${file.size}</td>
+                        <td>
+                            <a class="btn-download" href="/download/${encodedName}" target="_blank">⬇️ 下载</a>
+                            <button class="btn-delete" onclick="deleteFile('${encodedName}')">🗑️ 删除</button>
+                        </td>
+                    `;
+                    fileListBody.appendChild(row);
+                });
+
+                document.querySelectorAll('.file-checkbox').forEach(cb => {
+                    cb.addEventListener('change', syncSelectAllCheckbox);
+                });
+            } catch (error) {
+                console.error('加载文件列表失败:', error);
+            }
+        }
+
+        fetchInfo();
+        loadFileList();
+        setInterval(fetchInfo, REFRESH_INTERVAL);
+    </script>
+</body>
+</html>

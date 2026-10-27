@@ -57,3 +57,20 @@ Netlist_Schematic1_2026-09-22.tel
 .marscode/
 __pycache__/
 *.pyc
+
+# 本地构建/对照目录 (母机源以 firmware/ 为准)
+_build_mother/
+_ref_restore/
+_ec5d453_diff.txt
+_signpsi_hist.txt
+
+# 树莓派 AE: 只入库核心代码, 忽略数据包/补丁包/备份
+树莓派模型.zip
+树莓派模型/**/*.tar.gz
+树莓派模型/**/data_storage/
+树莓派模型/**/input/
+树莓派模型/**/output/
+树莓派模型/**/__pycache__/
+树莓派模型/ae_project_backup_*/
+树莓派模型/verification/
+树莓派模型/**/node24/

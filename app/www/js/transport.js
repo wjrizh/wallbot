@@ -99,6 +99,8 @@
       if (astate) { self._emit('alignState', astate); return; }
       var ajson = global.Protocol.parseAlignJson(bytes);
       if (ajson !== null && ajson !== undefined) { self._emit('alignJson', ajson); return; }
+      var ae = global.Protocol.parseAeDistance(bytes);
+      if (ae) { self._emit('aeDistance', ae); return; }
     };
 
     ws.onclose = function (ev) {

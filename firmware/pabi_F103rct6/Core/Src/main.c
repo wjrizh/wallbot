@@ -531,6 +531,15 @@ static uint8_t g_coop_prefetched = 0;   /* 主循环手动态预取到 COOP, 交
 #define TSTE_CMD  "TSTE"   /* mother->child: exit test */
 static volatile uint8_t g_tsta_pending = 0;   /* outer TSTA/key8, consume in Test_WaitLoop */
 
+/* AE 距离结果(Pi 串口→NRF); 变量提前声明供 AUTO 使用 */
+static uint8_t  g_ae_pending = 0;
+static uint8_t  g_ae_sent_ok = 0;
+static int16_t  g_ae_cm_x10 = 0x7FFF;
+static uint8_t  g_ae_near = 0xFF;
+static uint8_t  g_ae_pd = 0xFF;
+static uint8_t  g_ae_st = 0xFF;
+static uint32_t g_ae_last_tx_ms = 0;
+
 /* 解析 ADJ, 帧载荷 → 存入 g_adj_* */
 static void Adj_ParseStore(const uint8_t *buf){
   char tmp[33];
@@ -783,7 +792,10 @@ static uint8_t Coop_DelayReport(uint32_t ms){
   return 0;
 }
 
-/* 舵机作业: A给很小向上转速顶住, B短刹 */
+static void Pi_SendCap(void);
+static void Ae_Poll(void);
+
+/* 舵机作业: A给很小向上转速顶住, B短刹; 顺带抽 Pi 预测结果(不阻塞) */
 static uint8_t Coop_ServoAHold(uint32_t ms){
   uint32_t t0 = HAL_GetTick();
   Clear_All_PID();
@@ -791,6 +803,7 @@ static uint8_t Coop_ServoAHold(uint32_t ms){
     PID_MA(-8.0f);
     MB_STOP();
     Coop_ReportIMU();
+    Ae_Poll();
     if(Coop_PollAbort()) return 1;
     HAL_Delay(10);
   }
@@ -846,6 +859,7 @@ static uint8_t Coop_LiftThenGoUp(float target_roll, uint32_t lift_ms, uint32_t g
       __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 4199);
       __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 4199);
       Coop_ReportIMU();
+      Ae_Poll();
       if(Coop_PollAbort()) return 1;
       HAL_Delay(10);
       continue;
@@ -856,6 +870,7 @@ static uint8_t Coop_LiftThenGoUp(float target_roll, uint32_t lift_ms, uint32_t g
       loop_time = micros();
       if(micros() - climb_t0 > 30000000u) return 2;
       Coop_ReportIMU();
+      Ae_Poll();
       if(Coop_PollAbort()) return 1;
 
       if(!reached && (roll <= target_roll)){
@@ -1041,6 +1056,9 @@ void AUTO(void){
 
     if(Coop_DelayReport(200)) { g_coop_report_en = 0; motor_STOP(); return; }
     DUO_Motor_ON(DUO_NUM);
+    /* 通知 Pi 常驻服务开始采集; 不等待预测, 抬升不阻塞 */
+    g_ae_pending = 0; g_ae_sent_ok = 0; g_ae_last_tx_ms = 0;
+    Pi_SendCap();
     /* 探头下压作业 20s */
     if(Coop_ServoAHold(20000)) { g_coop_report_en = 0; motor_STOP(); return; }
     /* 作业后再加吸到1639, 再慢抬探头+往回爬 */
@@ -1547,6 +1565,7 @@ static uint8_t Adj_WaitLoop(void){
   while(1){
     uint8_t buf[32];
     Coop_ReportIMU();
+    Ae_Poll();   /* 预测若晚于抬升, 视觉等待阶段补发 NRF */
     if(safe_RxPacket(buf) == 0){
       if(Coop_FindFrame(buf, GOON_CMD)){
         printf("ADJ aligned, exit wait\r\n");
@@ -1720,16 +1739,14 @@ static void ApplyRemoteKey(int8_t key){
   DUO_Motor_SET(key);
 }
 
-/* ============ 树莓派串口指令链路(USART2: PA2-TX/PA3-RX, 115200, 接树莓派GPIO串口) ============
- * 协议(ASCII行, \n结尾), 每条回复 "OK <cmd>\n" 或 "ERR\n":
- *   W  进入作业模式(MODE=11, 轮子锁定)     X  退出作业模式回手操
- *   F+ 风机+100    F- 风机-100    F0 风机停(939)
- *   S+ 舵机+142    S- 舵机-142
- *   F=nnn  风机PWM直接设定(939~1800)
- *   S=nnnn 舵机PWM直接设定(499~2499)
- * 指令在主循环处理; AUTO运行期间只缓存最新一条, AUTO结束后执行 */
-#define PI_LINK_EN          0        /* 0=停用子机Pi串口通信(纠偏走NRF); 1=恢复网页手动控制 */
-#define PI_RX_LINE_MAX 24
+/* ============ 树莓派串口(USART1: PA9-TX/PA10-RX, 115200, 机载直连 Pi GPIO14/15) ============
+ * 协议(ASCII行, \n结尾):
+ *   子→Pi: CAP          探头下压后通知常驻服务开始采集
+ *   Pi→子: R,cm=..,near=..,pd=..,st=..   预测结果(不阻塞抬升)
+ *   调试兼用: W/X/F±/S±/F=/S=  (旧手动指令仍可用)
+ * NRF 上送母机: 'D' + flags + cm_x10(i16) + near(u8) + st(u8) */
+#define PI_LINK_EN          1
+#define PI_RX_LINE_MAX      64
 static uint8_t pi_rx_byte = 0;
 static volatile char    pi_rx_line[PI_RX_LINE_MAX];
 static volatile uint8_t pi_rx_idx = 0;
@@ -1737,10 +1754,10 @@ static volatile uint8_t pi_rx_ready = 0;
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  if(huart->Instance == USART2){
+  if(huart->Instance == USART1){
     uint8_t c = pi_rx_byte;
     if(pi_rx_ready){
-      pi_rx_idx = 0;                      /* 上一条还没被主循环取走, 丢弃新行 */
+      pi_rx_idx = 0;                      /* 上一条还没被取走, 丢弃新行开头并重新攒 */
     } else if(c == '\n' || c == '\r'){
       if(pi_rx_idx > 0){
         pi_rx_line[pi_rx_idx] = '\0';
@@ -1752,31 +1769,137 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     } else {
       pi_rx_idx = 0;                      /* 行超长, 丢弃重新同步 */
     }
-    HAL_UART_Receive_IT(&huart2, &pi_rx_byte, 1);
+    HAL_UART_Receive_IT(&huart1, &pi_rx_byte, 1);
   }
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  if(huart->Instance == USART2){
+  if(huart->Instance == USART1){
     __HAL_UART_CLEAR_OREFLAG(huart);
-    HAL_UART_Receive_IT(&huart2, &pi_rx_byte, 1);   /* 出错后重新挂接收 */
+    HAL_UART_Receive_IT(&huart1, &pi_rx_byte, 1);   /* 出错后重新挂接收 */
   }
 }
 
 static void Pi_Reply(const char *s){
-  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 20);
+  HAL_UART_Transmit(&huart1, (uint8_t*)s, (uint16_t)strlen(s), 20);
 }
 
-/* 主循环调用: 取出并执行一条树莓派指令 */
+static void Pi_SendCap(void){
+  Pi_Reply("CAP\n");
+}
+
+static uint8_t Ae_StCode(const char *st){
+  if(st == 0 || st[0] == 0) return 0xFF;
+  if(strcmp(st, "ok") == 0) return 0;
+  if(strcmp(st, "few") == 0) return 1;
+  if(strcmp(st, "bad") == 0) return 2;
+  if(strcmp(st, "err") == 0) return 3;
+  if(strcmp(st, "busy") == 0) return 4;
+  if(strcmp(st, "nopd") == 0) return 5;
+  return 0xFE;
+}
+
+/* 解析 R,cm=23.5,near=20,pd=1,st=ok */
+static void Ae_ParseResultLine(const char *cmd){
+  const char *p;
+  char key[8];
+  char val[16];
+  uint8_t ki, vi;
+  float cm;
+  int near, pd;
+  g_ae_cm_x10 = 0x7FFF;
+  g_ae_near = 0xFF;
+  g_ae_pd = 0xFF;
+  g_ae_st = 0xFF;
+  p = cmd;
+  if(p[0] != 'R' || p[1] != ',') return;
+  p += 2;
+  while(*p){
+    ki = 0; vi = 0;
+    while(*p && *p != '=' && ki < sizeof(key)-1) key[ki++] = *p++;
+    key[ki] = 0;
+    if(*p != '=') break;
+    p++;
+    while(*p && *p != ',' && vi < sizeof(val)-1) val[vi++] = *p++;
+    val[vi] = 0;
+    if(*p == ',') p++;
+    if(strcmp(key, "cm") == 0 && val[0]){
+      cm = (float)atof(val);
+      if(cm > -100.0f && cm < 200.0f) g_ae_cm_x10 = (int16_t)(cm * 10.0f + (cm >= 0 ? 0.5f : -0.5f));
+    } else if(strcmp(key, "near") == 0 && val[0]){
+      near = atoi(val);
+      if(near >= 0 && near <= 100) g_ae_near = (uint8_t)near;
+    } else if(strcmp(key, "pd") == 0 && val[0]){
+      pd = atoi(val);
+      if(pd == 0 || pd == 1) g_ae_pd = (uint8_t)pd;
+    } else if(strcmp(key, "st") == 0){
+      g_ae_st = Ae_StCode(val);
+    }
+  }
+  g_ae_pending = 1;
+  g_ae_sent_ok = 0;
+}
+
+static void Ae_TrySendNrf(void){
+  uint8_t f[32];
+  uint8_t flags;
+  uint32_t now;
+  if(!g_ae_pending || g_ae_sent_ok) return;
+  now = HAL_GetTick();
+  if(g_ae_last_tx_ms != 0 && (now - g_ae_last_tx_ms) < 200u) return; /* 限速补发 */
+  memset(f, 0, sizeof(f));
+  flags = 0;
+  if(g_ae_cm_x10 != (int16_t)0x7FFF) flags |= 0x01;
+  if(g_ae_near != 0xFF) flags |= 0x02;
+  if(g_ae_pd != 0xFF){ flags |= 0x04; if(g_ae_pd) flags |= 0x08; }
+  f[0] = 'D';
+  f[1] = flags;
+  memcpy(&f[2], &g_ae_cm_x10, 2);
+  f[4] = g_ae_near;
+  f[5] = g_ae_st;
+  g_ae_last_tx_ms = now;
+  if(Coop_SendRaw(f, 8, 3) == 0){
+    g_ae_sent_ok = 1;
+    g_ae_pending = 0;
+  }
+}
+
+/* AUTO 各循环空档调用: 抽串口结果 + 尝试 NRF 上送, 绝不长时间阻塞 */
+static void Ae_Poll(void){
+  char cmd[PI_RX_LINE_MAX];
+  uint8_t i;
+  if(pi_rx_ready){
+    for(i = 0; i < PI_RX_LINE_MAX; i++) cmd[i] = pi_rx_line[i];
+    pi_rx_ready = 0;
+    if(cmd[0] == 'R' && cmd[1] == ','){
+      Ae_ParseResultLine(cmd);
+    } else if(strncmp(cmd, "OK", 2) == 0){
+      /* CAP/PING 应答, 忽略 */
+    }
+    /* 其它指令留给主循环 Pi_CMD_Process; AUTO 内不执行手动键 */
+  }
+  Ae_TrySendNrf();
+}
+
+/* 主循环调用: 取出并执行一条树莓派指令(含 R 结果) */
 static void Pi_CMD_Process(void){
   char cmd[PI_RX_LINE_MAX];
   uint8_t i;
   int v;
-  if(!pi_rx_ready) return;
-  /* ready=1期间ISR不会写缓冲, 可直接拷贝后再清标志 */
+  if(!pi_rx_ready){
+    Ae_TrySendNrf();
+    return;
+  }
   for(i = 0; i < PI_RX_LINE_MAX; i++) cmd[i] = pi_rx_line[i];
   pi_rx_ready = 0;
+
+  if(cmd[0] == 'R' && cmd[1] == ','){
+    Ae_ParseResultLine(cmd);
+    Ae_TrySendNrf();
+    return;
+  }
+  if(strncmp(cmd, "OK", 2) == 0){ return; }
 
   if     (strcmp(cmd, "W")  == 0){ ApplyRemoteKey(7); Pi_Reply("OK W\n");  }
   else if(strcmp(cmd, "X")  == 0){ ApplyRemoteKey(9); Pi_Reply("OK X\n");  }
@@ -1803,6 +1926,7 @@ static void Pi_CMD_Process(void){
     } else { Pi_Reply("ERR\n"); }
   }
   else { Pi_Reply("ERR\n"); }
+  Ae_TrySendNrf();
 }
 
 int main(void)
@@ -1815,7 +1939,7 @@ int main(void)
   MX_SPI2_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
-  if(PI_LINK_EN) HAL_UART_Receive_IT(&huart2, &pi_rx_byte, 1);   /* 树莓派指令链路: 挂接收中断 */
+  if(PI_LINK_EN) HAL_UART_Receive_IT(&huart1, &pi_rx_byte, 1);   /* 树莓派 USART1 PA9/PA10 */
   MX_USART3_UART_Init();
   
   
