@@ -61,7 +61,9 @@ void JoypadSender_Task(void *pvParameters) {
         buf[5] = last_key;
 
         if (AutoMode_IsActive() || AlignTest_IsActive()) {
-            /* 协同/纠偏测试帧最长 21 字节 (ADJ,...), 缓冲必须够大 */
+            /* 先 Tick 再发: 避免 GOON/ADJ 补发前 flush_rx 冲掉已到的 DONE/REDY */
+            if (AutoMode_IsActive()) AutoMode_Tick();
+            if (AlignTest_IsActive()) AlignTest_Tick();
             uint8_t fbuf[32]; uint8_t flen = 0;
             if (AutoMode_WantsSendFrame(fbuf, &flen)) {
                 /* 失败则保留待发、不推进状态, 下周期继续补发直到成功 */
@@ -72,8 +74,6 @@ void JoypadSender_Task(void *pvParameters) {
                 NRF_SendFrame(fbuf, flen);
                 AlignTest_OnFrameSent();
             }
-            if (AutoMode_IsActive()) AutoMode_Tick();
-            if (AlignTest_IsActive()) AlignTest_Tick();
             vTaskDelayUntil(&xLastWakeTime, period);
             continue;
         }

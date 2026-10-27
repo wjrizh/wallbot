@@ -56,7 +56,7 @@
 #define LANDMARK_DUAL_TAG  2
 #define LANDMARK_MODE      LANDMARK_DUAL_TAG
 
-#define TAG_REAL_MM         22.0f  /* 单枚码黑框边长(mm); 双码模式不用它做比例尺 */
+#define TAG_REAL_MM         15.0f  /* 单枚码黑框边长(mm); 双码模式不用它做比例尺 */
 #define DUAL_TAG_SEP_MM     40.0f  /* ★两码中心实测距(mm), 卡尺量完必须改 */
 #define CHASSIS_HOLE_SEP_MM 45.0f  /* 双孔备份: 两腰形孔中心距(mm) */
 #if LANDMARK_MODE == LANDMARK_DUAL_TAG

@@ -29,7 +29,7 @@ except Exception as e:
 
 # ========== 几何常数（视觉 config.h / tag_utils）==========
 DUAL_TAG_SEP_MM = 40.0
-TAG_REAL_MM = 22.0
+TAG_REAL_MM = 15.0
 R_TAG_MM = 395.0
 PIPE_RADIUS_MM = 250.0
 TAG_ID_A = 0

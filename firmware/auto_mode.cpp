@@ -58,6 +58,7 @@ static uint8_t g_send_buf[32] = {0};
 static uint8_t g_send_len = 0;
 static uint16_t g_txFailCount = 0;   /* 连续发送失败次数 */
 static uint8_t  g_alert = 0;        /* 0x88[2] 告警码, 见 auto_mode.h */
+static uint32_t g_goonResendAt = 0; /* VISION_WAIT_DONE 下 GOON 周期补发 */
 
 /* 接收滑动窗口 */
 static uint8_t g_rx_buf[8] = {0};
@@ -382,7 +383,8 @@ void AutoMode_Tick(void) {
                     Serial.printf("[CV] 收敛, 共 %u 轮\n", (unsigned)g_cvIter);
                     WebServer_SendLog("[COOP] 阶段: 视觉收敛, 发GOON②等DONE");
                     request_send(FRAME_GOON);
-                    g_waitDeadline = millis() + 10000;
+                    g_goonResendAt = millis() + 800;
+                    g_waitDeadline = millis() + 20000;  /* 子机周期补发 DONE */
                     g_cs = COOP_VISION_WAIT_DONE;
                 } else {
                     Serial.printf("[CV] aligned hit %u/%u, 复测\n",
@@ -400,7 +402,8 @@ void AutoMode_Tick(void) {
                     Serial.println("[CV] 命令全死区, 视为收敛");
                     WebServer_SendLog("[COOP] 阶段: 死区收敛, 发GOON②等DONE");
                     request_send(FRAME_GOON);
-                    g_waitDeadline = millis() + 10000;
+                    g_goonResendAt = millis() + 800;
+                    g_waitDeadline = millis() + 20000;  /* 子机周期补发 DONE */
                     g_cs = COOP_VISION_WAIT_DONE;
                 } else {
                     char cb[72];
@@ -436,6 +439,8 @@ void AutoMode_Tick(void) {
         break;
     }
     case COOP_VISION_WAIT:
+        /* ADJ 未发出前不认 REDY: 避免子机补发的旧 REDY 被当成「本步已完成」 */
+        if (g_wants_send) break;
         if (recv_match_or_imu(FRAME_REDY)) {
             Serial.printf("[CV] it=%u 子机走完, 复测\n", (unsigned)g_cvIter);
             WebServer_SendLog("[COOP] 阶段: 子机步完成, 复测");
@@ -450,6 +455,7 @@ void AutoMode_Tick(void) {
         }
         break;
     case COOP_VISION_WAIT_DONE:
+        /* 先收 DONE; 子机若漏收 GOON 会一直补 REDY — 母机周期补发 GOON */
         if (recv_match(FRAME_DONE)) {
             Serial.println("[COOP] 收 DONE, PB9 160->80");
             WebServer_SendLog("[COOP] 阶段: 收DONE, PB9下压夹紧");
@@ -462,6 +468,10 @@ void AutoMode_Tick(void) {
             g_alert = 2;
             WebServer_SendLog("[COOP] 问题: 等DONE超时, 中止");
             AutoMode_Abort();
+        } else if (!g_wants_send && (int32_t)(millis() - g_goonResendAt) >= 0) {
+            request_send(FRAME_GOON);
+            g_goonResendAt = millis() + 800;
+            WebServer_SendLog("[COOP] 补发GOON②(等DONE)");
         }
         break;
     case COOP_PB9_DOWN_2:

@@ -14,6 +14,7 @@ static const uint8_t FRAME_TSTA[4] = {'T','S','T','A'};
 static const uint8_t FRAME_TSTE[4] = {'T','S','T','E'};
 static const uint8_t FRAME_GOON[4] = {'G','O','O','N'};
 static const uint8_t FRAME_REDY[4] = {'R','E','D','Y'};
+static const uint8_t FRAME_DONE[4] = {'D','O','N','E'};
 
 typedef enum {
     AT_IDLE = 0,

@@ -522,7 +522,9 @@ void DUO_Motor_OFF(void){
 #define DONE_RSP  "DONE"
 #define ACKD_RSP  "ACKD"
 #define ADJ_CMD   "ADJ,"        /* 纠偏帧: ADJ,<phi>,<psi>,<ax> */
-#define ADJ_WAIT_MS  180000u    /* 纠偏等待总时限(ms), 超时视为母机失联 */
+#define ADJ_WAIT_MS  60000u     /* 空闲超时(ms): 整段纠偏≤50s, 60s 足够; 有 ADJ/GOON 刷新 */
+#define ADJ_REDY_RESEND_MS  1200u /* 等待指令时补发 REDY; 略疏, 少占 TX 以免漏收 GOON */
+#define DONE_RESEND_MS      800u  /* 等 LOCK 时周期补发 DONE */
 #define COOP_IMU_PERIOD_MS  200u
 static uint8_t g_coop_prefetched = 0;   /* 主循环手动态预取到 COOP, 交给 AUTO() 消费 */
 #define TSTA_CMD  "TSTA"   /* mother->child: enter vision-adj test */
@@ -632,6 +634,15 @@ static void Coop_SendFrame(const char *frame){
   else                               printf("%s send fail\r\n", frame);
 }
 
+/* 保活补发用: 少重试, 尽快回 RX, 降低漏收 GOON/ADJ 概率 */
+static void Coop_SendFrameLight(const char *frame){
+  uint8_t buf[32] = {0};
+  size_t len = strlen(frame);
+  if(len > 32) len = 32;
+  memcpy(buf, frame, len);
+  (void)Coop_SendRaw(buf, 32, 2);
+}
+
 /* 轮子运动遥测帧 'J' (11 字节), 母机原样转发 App */
 /* 子机日志帧 'L': [0]='L' [1]=长度 [2..] 文本.
  * 子机 printf 无 _write 重定向(nosys.specs), 日志只能经 NRF 送回母机打印到串口.
@@ -725,6 +736,28 @@ static uint8_t Coop_WaitFrame(const char *frame){
   }
 }
 
+/* 等 want 帧, 同时周期补发 resend (解决 DONE/REDY 单次发送被冲掉后双方互锁) */
+static uint8_t Coop_WaitFrameResend(const char *want, const char *resend, uint32_t period_ms){
+  uint8_t buf[32];
+  uint32_t last = HAL_GetTick();
+  NRF24L01_Write_Reg(FLUSH_RX, 0xff);
+  while(1){
+    if(safe_RxPacket(buf) == 0){
+      if(Coop_FindFrame(buf, want)){
+        printf("%s received\r\n", want);
+        return 0;
+      }
+      if(Coop_TakeAbort(buf)){
+        return 1;
+      }
+    }
+    if(HAL_GetTick() - last >= period_ms){
+      Coop_SendFrameLight(resend);
+      last = HAL_GetTick();
+    }
+  }
+}
+
 static void Coop_ReportIMU(void){
   uint8_t buf[32] = {0};
   if(!g_coop_report_en) return;
@@ -750,7 +783,7 @@ static uint8_t Coop_DelayReport(uint32_t ms){
   return 0;
 }
 
-/* 舵机作业8s: A给很小向上转速顶住, B短刹 */
+/* 舵机作业: A给很小向上转速顶住, B短刹 */
 static uint8_t Coop_ServoAHold(uint32_t ms){
   uint32_t t0 = HAL_GetTick();
   Clear_All_PID();
@@ -764,6 +797,90 @@ static uint8_t Coop_ServoAHold(uint32_t ms){
   motor_STOP();
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 4199);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 4199);
+  return 0;
+}
+
+/* 探头从 DUO_NUM 线性慢抬到收回位(499), 共 lift_ms;
+ * 抬起 go_after_ms 后开始 GO_UP 往回爬 (与剩余抬升重叠)。
+ * 返回: 0完成 1中止 2超时 */
+static uint8_t Coop_LiftThenGoUp(float target_roll, uint32_t lift_ms, uint32_t go_after_ms){
+  uint16_t duo_from = (uint16_t)DUO_NUM;
+  uint16_t duo_to = 499;
+  uint32_t t0 = HAL_GetTick();
+  uint32_t loop_time = micros();
+  uint32_t climb_t0 = 0;
+  uint8_t climbing = 0;
+  uint8_t fan_cut2 = 0;
+  uint8_t reached = 0;
+
+  Clear_All_PID();
+  printf("AUTO: duo lift %ums, GO_UP after %ums\r\n",
+         (unsigned)lift_ms, (unsigned)go_after_ms);
+
+  while(1){
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsed = now - t0;
+
+    /* 探头 5s 线性抬起 */
+    if(elapsed < lift_ms){
+      uint16_t duo = (uint16_t)(duo_from -
+        (uint32_t)(duo_from - duo_to) * elapsed / lift_ms);
+      DUO_PWM_SET = duo;
+      __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, duo);
+    } else if(DUO_PWM_SET != duo_to){
+      DUO_PWM_SET = duo_to;
+      DUO_Motor_OFF();
+    }
+
+    if(!climbing && elapsed >= go_after_ms){
+      climbing = 1;
+      climb_t0 = micros();
+      loop_time = micros();
+      Clear_All_PID();
+      printf("AUTO: start GO_UP (duo still lifting)\r\n");
+    }
+
+    if(!climbing){
+      /* 抬起前 1s: 底部刹住 */
+      motor_STOP();
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 4199);
+      __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 4199);
+      Coop_ReportIMU();
+      if(Coop_PollAbort()) return 1;
+      HAL_Delay(10);
+      continue;
+    }
+
+    /* 与 GO_UP 同周期爬坡; 到顶后若探头未抬完则刹住等抬完 */
+    if(micros() - loop_time >= 10000u){
+      loop_time = micros();
+      if(micros() - climb_t0 > 30000000u) return 2;
+      Coop_ReportIMU();
+      if(Coop_PollAbort()) return 1;
+
+      if(!reached && (roll <= target_roll)){
+        float d_left = target_roll - roll;
+        if(!fan_cut2 && d_left < 30.0f){
+          fan_cut2 = 1;
+          if(FENG_PWM_SET > (uint16_t)(939u + 2u * FENG_UP))
+            FENG_PWM_SET = (uint16_t)(FENG_PWM_SET - 2u * FENG_UP);
+          else
+            FENG_PWM_SET = 939;
+          __HAL_TIM_SET_COMPARE(&htim5, TIM_CHANNEL_1, FENG_PWM_SET);
+          printf("GO_UP: fan-2 @<%ddeg -> %u\r\n", 30, (unsigned)FENG_PWM_SET);
+        }
+        if(d_left < 5.0f) PID_IMU(0, 40);
+        else               PID_IMU(0, 100);
+      } else {
+        reached = 1;
+        motor_STOP();
+        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 4199);
+        __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_2, 4199);
+        if(elapsed >= lift_ms) break;
+      }
+    }
+  }
+  DUO_Motor_OFF();
   return 0;
 }
 
@@ -797,12 +914,23 @@ uint8_t GO_DOWN(float _degree){
 uint8_t GO_UP(float _degree){
   uint32_t loop_time = micros();
   uint32_t t_start = micros();
+  uint8_t fan_cut2 = 0; /* 近顶(剩余<30°)降吸两档, 只做一次, 保持到 AUTO 结束 */
   while(1){
     if (micros() - loop_time >= 10000) {
       loop_time = micros();
       if(micros() - t_start > 30000000u) return 2; /* 超时: 返回2, 调用方不再上报DONE */
       if((roll) <= _degree ){
         float d_left = _degree - roll;
+        /* 回来剩余角 <30°: 吸力降两档(每档 FENG_UP), 直到 FENG_Motor_OFF */
+        if(!fan_cut2 && d_left < 30.0f){
+          fan_cut2 = 1;
+          if(FENG_PWM_SET > (uint16_t)(939u + 2u * FENG_UP))
+            FENG_PWM_SET = (uint16_t)(FENG_PWM_SET - 2u * FENG_UP);
+          else
+            FENG_PWM_SET = 939;
+          __HAL_TIM_SET_COMPARE(&htim5, TIM_CHANNEL_1, FENG_PWM_SET);
+          printf("GO_UP: fan-2 @<%ddeg -> %u\r\n", 30, (unsigned)FENG_PWM_SET);
+        }
         if (d_left < 5.0f) {
           PID_IMU(0, 40);   /* 最后5°减速, 与下行对称, 防过冲急刹 */
         } else {
@@ -913,16 +1041,19 @@ void AUTO(void){
 
     if(Coop_DelayReport(200)) { g_coop_report_en = 0; motor_STOP(); return; }
     DUO_Motor_ON(DUO_NUM);
-    if(Coop_ServoAHold(8000)) { g_coop_report_en = 0; motor_STOP(); return; }
-    DUO_Motor_OFF();
-    /* 舵机作业完成后再加吸到1639 */
+    /* 探头下压作业 20s */
+    if(Coop_ServoAHold(20000)) { g_coop_report_en = 0; motor_STOP(); return; }
+    /* 作业后再加吸到1639, 再慢抬探头+往回爬 */
     FENG_PWM_SET = 1639;
     __HAL_TIM_SET_COMPARE(&htim5,TIM_CHANNEL_1,FENG_PWM_SET);
     if(Coop_DelayReport(500)) { g_coop_report_en = 0; motor_STOP(); return; }
 
     Clear_All_PID();
-    /* GO_UP 返回: 0=到位 1=中止 2=超时。超时/中止都不上报DONE, 保持吸力回手动 */
-    if(GO_UP(roll_Compose)) { g_coop_report_en = 0; motor_STOP(); return; }
+    /* 探头 5s 慢抬; 抬起满 1s 后开始 GO_UP (与剩余抬升重叠)
+     * 0=到位 1=中止 2=超时。超时/中止都不上报DONE, 保持吸力回手动 */
+    if(Coop_LiftThenGoUp(roll_Compose, 5000, 1000)) {
+      g_coop_report_en = 0; motor_STOP(); return;
+    }
     motor_STOP();
 
     /* 视觉纠偏: GO_UP 结束即通知母机开始纠偏 (REDY②);
@@ -933,7 +1064,8 @@ void AUTO(void){
 
     g_coop_report_en = 0;
     Coop_SendFrame(DONE_RSP);
-    if(Coop_WaitFrame(LOCK_CMD)) { motor_STOP(); return; }
+    /* DONE 可能被母机侧发送冲掉: 等 LOCK 期间周期补发 */
+    if(Coop_WaitFrameResend(LOCK_CMD, DONE_RSP, DONE_RESEND_MS)) { motor_STOP(); return; }
 
     FENG_Motor_OFF();
     Clear_All_PID();
@@ -962,7 +1094,7 @@ uint32_t Flash_ReadNUM[2] = {0};
 #define ADJ_PI              3.14159265f
 #define ADJ_SPEED_REV       80.0f    /* 纠偏速度(电机轴转/s). kp*err=18*80≈1440→占空比~34%; 8.0时仅~3%低于静摩擦,轮不动A=B=0 */
 #define ADJ_MM_PER_MOTORREV 0.3555f /* 里程计 mm/电机轴转: π×轮径43 / 减速比380; 卷尺复核可再微调 */
-#define ADJ_TRACK_MM        145.0f   /* wheel track mm (measured 145) */
+#define ADJ_TRACK_MM        163.0f   /* wheel track mm (measured 163) */
 #define ADJ_PIPE_R_MM       250.0f   /* 管道外半径(mm): 用户指定 R=250 (直径约50cm) */
 #define ADJ_DIAG_BETA_DEG   20.0f    /* 轴向斜行定角(deg), 最大自旋=2×β */
 #define ADJ_MV_SIGN         (+1)     /* 标定: φ>0 时应往哪边走(+1=下降方向) */
@@ -1406,10 +1538,11 @@ adj_done:
 /* 纠偏等待循环(GO_UP到位且已武装时进入):
  * 收 ADJ,φ,ψ,ax → Adj_Execute → 回REDY(可复测)
  * 收 GOON → 对齐确认, 返回0(调用方发DONE)
- * 收 STOP/遥控 → 返回1(中止); 180s无帧 → 返回2
- * 期间 IMU 遥测保持开启 */
+ * 收 STOP/遥控 → 返回1(中止); 空闲 180s 无 ADJ/GOON → 返回2
+ * 等待指令期间周期补发 REDY (含 REDY②), 避免母机漏收后双方原地互锁 */
 static uint8_t Adj_WaitLoop(void){
   uint32_t t0 = HAL_GetTick();
+  uint32_t last_redy = 0;   /* 0=尽快补发一枪 */
   printf("ADJ wait: hold for vision\r\n");
   while(1){
     uint8_t buf[32];
@@ -1425,16 +1558,24 @@ static uint8_t Adj_WaitLoop(void){
       }
       if(Coop_FindFrame(buf, ADJ_CMD)){
         uint8_t rc;
+        t0 = HAL_GetTick();                         /* 有下行则刷新空闲超时 */
         Adj_ParseStore(buf);
         printf("ADJ exec phi=%d psi=%d ax=%d\r\n",
                (int)g_adj_phi, (int)g_adj_psi, (int)g_adj_ax);
         rc = Adj_Execute(g_adj_phi, g_adj_psi, g_adj_ax);
         if(rc == 1) return 1;                       /* 中止 */
         Coop_SendFrame(REDY_RSP);                   /* 步完成, 可复测 */
+        last_redy = HAL_GetTick();
+        t0 = last_redy;
       }
       else if(Coop_TakeAbort(buf)){
         return 1;                                   /* STOP/遥控接管 */
       }
+    }
+    /* 周期轻量补发 REDY: 覆盖丢包; 少占 TX 以便收到收敛 GOON */
+    if(last_redy == 0 || (HAL_GetTick() - last_redy >= ADJ_REDY_RESEND_MS)){
+      Coop_SendFrameLight(REDY_RSP);
+      last_redy = HAL_GetTick();
     }
     if(HAL_GetTick() - t0 > ADJ_WAIT_MS){
       printf("ADJ wait timeout\r\n");
@@ -1495,29 +1636,37 @@ static uint8_t Test_WaitLoop(void){
 
   Coop_SendFrame(DONE_RSP);
   printf("TEST: DONE, wait TSTE\r\n");
-  NRF24L01_Write_Reg(FLUSH_RX, 0xff);
-  while(1){
-    if(safe_RxPacket(buf) == 0){
-      if(Coop_FindFrame(buf, TSTE_CMD)){
-        printf("TSTE received, exit test\r\n");
-        motor_STOP();
-        return 1;
+  {
+    uint32_t last_done = HAL_GetTick();
+    NRF24L01_Write_Reg(FLUSH_RX, 0xff);
+    while(1){
+      if(safe_RxPacket(buf) == 0){
+        if(Coop_FindFrame(buf, TSTE_CMD)){
+          printf("TSTE received, exit test\r\n");
+          motor_STOP();
+          return 1;
+        }
+        if(Coop_FindFrame(buf, TSTA_CMD)){
+          g_coop_report_en = 1;
+          g_imu_last_tx_us = 0;
+          Coop_SendFrame(REDY_RSP);
+          rc = Adj_WaitLoop();
+          g_coop_report_en = 0;
+          if(rc != 0){ motor_STOP(); return 1; }
+          Coop_SendFrame(DONE_RSP);
+          last_done = HAL_GetTick();
+          NRF24L01_Write_Reg(FLUSH_RX, 0xff);
+          continue;
+        }
+        if(Coop_TakeAbort(buf)){
+          printf("TEST abort after DONE\r\n");
+          motor_STOP();
+          return 1;
+        }
       }
-      if(Coop_FindFrame(buf, TSTA_CMD)){
-        g_coop_report_en = 1;
-        g_imu_last_tx_us = 0;
-        Coop_SendFrame(REDY_RSP);
-        rc = Adj_WaitLoop();
-        g_coop_report_en = 0;
-        if(rc != 0){ motor_STOP(); return 1; }
+      if(HAL_GetTick() - last_done >= DONE_RESEND_MS){
         Coop_SendFrame(DONE_RSP);
-        NRF24L01_Write_Reg(FLUSH_RX, 0xff);
-        continue;
-      }
-      if(Coop_TakeAbort(buf)){
-        printf("TEST abort after DONE\r\n");
-        motor_STOP();
-        return 1;
+        last_done = HAL_GetTick();
       }
     }
   }
