@@ -1789,6 +1789,8 @@ static void Pi_SendCap(void){
   Pi_Reply("CAP\n");
 }
 
+/* 与 Pi ae_uart / App AE_ST_TEXT 对齐:
+ * 0 ok  1 few  2 bad  3 err  4 busy  5 nopd  6 near  7 out */
 static uint8_t Ae_StCode(const char *st){
   if(st == 0 || st[0] == 0) return 0xFF;
   if(strcmp(st, "ok") == 0) return 0;
@@ -1797,6 +1799,8 @@ static uint8_t Ae_StCode(const char *st){
   if(strcmp(st, "err") == 0) return 3;
   if(strcmp(st, "busy") == 0) return 4;
   if(strcmp(st, "nopd") == 0) return 5;
+  if(strcmp(st, "near") == 0) return 6;
+  if(strcmp(st, "out") == 0) return 7;
   return 0xFE;
 }
 

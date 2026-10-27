@@ -96,12 +96,19 @@
   CoopModule.prototype._onAeDistance = function (d) {
     if (!d || !this._els.ae) return;
     var parts = [];
-    if (d.cm != null) parts.push(d.cm.toFixed(1) + ' cm');
-    else parts.push('无数值');
+    /* 与桌面模型 distanceText 同口径：有距离先报距离，否则报状态话术 */
+    if (d.cm != null) {
+      parts.push(d.cm.toFixed(1) + ' cm');
+      if (d.status === 0) parts.push('标定范围内');
+      else if (d.statusText) parts.push(d.statusText);
+    } else if (d.statusText) {
+      parts.push(d.statusText);
+    } else {
+      parts.push('无有效距离');
+    }
     if (d.nearCm != null) parts.push('标准点 ' + d.nearCm + ' cm');
     if (d.pd === true) parts.push('疑似局放');
-    else if (d.pd === false) parts.push('未检出');
-    if (d.statusText) parts.push(d.statusText);
+    else if (d.pd === false) parts.push('未检出局放');
     var text = parts.join(' · ');
     this._els.ae.textContent = text;
     UI.log('AE距离: ' + text);

@@ -106,13 +106,19 @@ static void note_ae_frame(const uint8_t* tmp, uint8_t len) {
     g_ae_fresh = true;
     g_ae_seq++;
     {
-        char lb[80];
+        /* st 与 App AE_ST_TEXT / Pi 短码一致 */
+        static const char* const kAeSt[] = {
+            "标定范围内", "有效事件不足", "采样条件不匹配", "预测失败",
+            "服务忙", "未检出局放", "近场约0–10cm", "超出可显示范围"
+        };
+        const char* stTxt = (g_ae_st < 8) ? kAeSt[g_ae_st] : "未知状态";
+        char lb[96];
         if (g_ae_cm_x10 != (int16_t)0x7FFF)
-            snprintf(lb, sizeof(lb), "[AE] 距离 %.1fcm 标准点 %u pd=%u st=%u",
-                     g_ae_cm_x10 / 10.0f, (unsigned)g_ae_near, (unsigned)g_ae_pd, (unsigned)g_ae_st);
+            snprintf(lb, sizeof(lb), "[AE] %.1f cm · %s · 标准点 %u · pd=%u",
+                     g_ae_cm_x10 / 10.0f, stTxt, (unsigned)g_ae_near, (unsigned)g_ae_pd);
         else
-            snprintf(lb, sizeof(lb), "[AE] 无有效距离 near=%u pd=%u st=%u",
-                     (unsigned)g_ae_near, (unsigned)g_ae_pd, (unsigned)g_ae_st);
+            snprintf(lb, sizeof(lb), "[AE] %s · 标准点 %u · pd=%u",
+                     stTxt, (unsigned)g_ae_near, (unsigned)g_ae_pd);
         WebServer_SendLog(lb);
         Serial.println(lb);
     }

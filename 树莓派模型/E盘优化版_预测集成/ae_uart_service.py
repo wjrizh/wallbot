@@ -25,7 +25,8 @@ from typing import Optional
 
 HERE = Path(__file__).resolve().parent
 PREDICTOR_DIR = HERE / "predictor_10_20"
-PREDICT_JS = PREDICTOR_DIR / "live_prediction_10.20.js"
+# CAP 结束后用桌面同款最终预测(非网页 provisional live)
+PREDICT_JS = PREDICTOR_DIR / "cap_prediction.js"
 DATA_DIR = Path(os.environ.get("AE_DATA_DIR", HERE / "data_storage"))
 MAIN_PY = HERE / "main.py"
 SERIAL_PORT = os.environ.get("AE_UART_PORT", "/dev/serial0")
@@ -81,24 +82,38 @@ def _latest_pridb(after_mtime: float) -> Optional[Path]:
     return best
 
 
-def _status_code(status: str, has_pd) -> str:
+# 与子机 Ae_StCode / App AE_ST_TEXT / 模型 status 对齐的短码
+def _status_code(status: str, has_pd, distance_cm) -> str:
+    if status in ("near_source_point", "near_10cm_or_near_field"):
+        return "near"  # 近场约0–10cm，无细分数值
     if status in (
-        "near_source_point",
-        "near_10cm_or_near_field",
         "near_10cm_boundary",
         "within_calibration_range",
         "near_50cm_boundary",
         "beyond_50cm_outside_calibration",
     ):
         return "ok"
-    if status in ("insufficient_events", "collecting", "waiting_for_pridb", "waiting_for_tradb"):
+    if status in (
+        "insufficient_events",
+        "collecting",
+        "waiting_for_pridb",
+        "waiting_for_tradb",
+        "no_ae_events",
+    ):
         return "few"
     if status in ("incompatible_acquisition",):
         return "bad"
-    if status in ("below_noise_or_beyond_50cm",) or has_pd is False:
+    if status in ("below_noise_or_beyond_50cm",):
         return "nopd"
+    if status in ("beyond_60cm_outside_display",):
+        return "out"
     if status in ("temporarily_unavailable",):
         return "busy"
+    # 有数值时优先 ok，避免 has_pd=False 误盖掉距离
+    if distance_cm is not None:
+        return "ok"
+    if has_pd is False:
+        return "nopd"
     return "err"
 
 
@@ -107,7 +122,9 @@ def _format_result(obj: dict) -> str:
     cm = res.get("distanceCm")
     near = res.get("nearestReferenceDistanceCm")
     pd = res.get("hasPartialDischarge")
-    st = _status_code(str(obj.get("status") or ""), pd)
+    st = _status_code(str(obj.get("status") or ""), pd, cm)
+    text = res.get("distanceText") or ""
+    _log(f"预测 status={obj.get('status')} cm={cm} near={near} pd={pd} → st={st} | {text}")
     cm_s = "" if cm is None else f"{float(cm):.1f}"
     near_s = "" if near is None else str(int(near))
     if pd is True:

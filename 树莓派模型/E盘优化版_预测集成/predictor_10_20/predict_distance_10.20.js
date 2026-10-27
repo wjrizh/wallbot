@@ -381,7 +381,8 @@ function evaluateMultiFeatureDistance(rmsMedian, ampMedian, ssMedian, model) {
   };
 }
 
-function predictOne(pridbPath, modelPack) {
+function predictOne(pridbPath, modelPack, options = {}) {
+  const allowIncompatibleTradb = options.allowIncompatibleTradb === true;
   const tradbPath = pridbPath.replace(/\.pridb$/i, '.tradb');
   const hasTradb = fs.existsSync(tradbPath);
 
@@ -483,11 +484,15 @@ function predictOne(pridbPath, modelPack) {
     let distanceCm = evalRes.reportedDistanceCm;
     let distanceText = evalRes.rangeText;
 
-    if (hasTradb && !waveformCompatible) {
+    if (hasTradb && !waveformCompatible && !allowIncompatibleTradb) {
       status = 'incompatible_acquisition';
       hasPartialDischarge = null;
       distanceCm = null;
       distanceText = '采样率或波形长度不在可用模式内，无法判断局放或预测距离';
+    } else if (hasTradb && !waveformCompatible && allowIncompatibleTradb) {
+      // CAP/现场采集波形长度随击中变化，不等于标定窗 200k；仍用 .pridb 多特征给距离
+      warnings.unshift('波形长度与标定窗不一致，已回退为 .pridb 特征预测（与桌面端无 tradb / 旧脚本行为一致）。');
+      waveformMode = 'pridb_only_fallback';
     } else if (events.length < 30) {
       status = 'insufficient_events';
       hasPartialDischarge = null;
@@ -618,8 +623,8 @@ if (require.main === module) {
   }
 }
 
-// Reuse the calibrated model in the lightweight read-only web preview.
+// Reuse the calibrated model in the lightweight read-only web preview / CAP final.
 module.exports = {
   loadModel, readEvents, median, quantile, nearestReference,
-  evaluateMultiFeatureDistance
+  evaluateMultiFeatureDistance, predictOne
 };

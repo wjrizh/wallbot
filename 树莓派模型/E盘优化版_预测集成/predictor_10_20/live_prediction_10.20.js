@@ -76,11 +76,13 @@ function predict(pridbPath) {
     const shortWindow = oneRate && wave.shapes[0].sampleCount === SHORT_WINDOW_SAMPLES;
     const compatible = fullWindow || shortWindow;
     base.quality.waveformCompatible = compatible;
-    base.quality.predictionMode = fullWindow ? 'full_multifeature' : shortWindow ? 'experimental_20k_rms' : null;
+    // 现场击中波形长度常≠200k：与 CAP/桌面一致，回退 .pridb 多特征，不因窗长清空距离
+    base.quality.predictionMode = fullWindow ? 'full_multifeature'
+      : shortWindow ? 'experimental_20k_rms'
+        : 'pridb_only_fallback';
     if (!compatible) {
       const shapeText = wave.shapes.map(s => s.sampleRateHz + ' Hz / ' + s.sampleCount + ' 点').join('；');
-      base.quality.warnings.push('当前波形：' + shapeText + '；可用模式为 2 MHz / 200,000 点，或实验性的 2 MHz / 20,000 点 RMS 模式。');
-      return { ...base, status: 'incompatible_acquisition', result: { ...base.result, distanceText: '采样条件不匹配，不能预测距离' } };
+      base.quality.warnings.push('当前波形：' + shapeText + '；已回退为 .pridb 特征预测（与桌面端一致）。');
     }
     if (events.length < MIN_EVENTS) {
       return { ...base, status: 'insufficient_events', result: { ...base.result, distanceText: '有效事件不足 30 条，继续采集' } };
@@ -89,9 +91,7 @@ function predict(pridbPath) {
     const rms = median(events.map(e => e.rms));
     const amp = median(events.map(e => e.amp));
     const ss = median(events.map(e => e.ss));
-    // 20k 窗口的 Amp / SS 与 200k 标定窗长不同，只使用 RMS。
-    // 在 10.20 亚克力的 31 组记录中，截取前 20k 点后 RMS 中位数
-    // 相对原始 200k RMS 中位数的最大偏差为 1.47%（内部核验，不是现场验证）。
+    // 20k 或非标定窗长：Amp/SS 与 200k 标定不一致，只使用 RMS / 或 pridb 多特征
     const estimated = shortWindow
       ? evaluateMultiFeatureDistance(rms, NaN, NaN, modelPack.model)
       : evaluateMultiFeatureDistance(rms, amp, ss, modelPack.model);
@@ -99,7 +99,7 @@ function predict(pridbPath) {
     const calibrated = ['near_source_point', 'near_10cm_or_near_field', 'near_10cm_boundary', 'within_calibration_range', 'near_50cm_boundary'].includes(estimated.status);
     const displayable = (calibrated || estimated.status === 'beyond_50cm_outside_calibration')
       && estimated.reportedDistanceCm != null && estimated.reportedDistanceCm < 60;
-    const hasPartialDischarge = shortWindow ? null
+    const hasPartialDischarge = (shortWindow || !compatible) ? null
       : estimated.status === 'below_noise_or_beyond_50cm' ? false
       : calibrated ? true : null;
     const distanceCm = displayable ? estimated.reportedDistanceCm : null;
