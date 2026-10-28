@@ -74,3 +74,9 @@ _signpsi_hist.txt
 树莓派模型/ae_project_backup_*/
 树莓派模型/verification/
 树莓派模型/**/node24/
+
+# 子机 Windows 构建/烧录辅助脚本 (仅本地使用, 不入库)
+firmware/pabi_F103rct6/_build_now.bat
+firmware/pabi_F103rct6/_build_with_python.py
+firmware/pabi_F103rct6/_flash_fixed.bat
+firmware/pabi_F103rct6/build_log_merge.txt
